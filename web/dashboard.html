@@ -1,0 +1,1157 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EVBudget</title>
+    <!-- Google Fonts Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Chart.js, pinned to an exact version so an upstream release can't change the charts -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="/web/dashboard.css">
+</head>
+<body>
+
+    <!-- Header Bar -->
+    <header class="app-header">
+        <div class="brand-area">
+            <div class="brand-icon">B</div>
+            <div>
+                <div class="brand-title">EVBudget</div>
+                <div class="brand-subtitle">Import, analyze, and budget your transactions</div>
+            </div>
+        </div>
+        <div class="header-actions">
+            <!-- Reload Data Action -->
+            <button class="btn-refresh" id="btnRefreshData" onclick="reloadTransactionData()" title="Reload data from database">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="23 4 23 10 17 10"></polyline>
+                    <polyline points="1 20 1 14 7 14"></polyline>
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                </svg>
+                Reload Data
+            </button>
+            <!-- Envelope Manager Action -->
+            <button class="btn-envelopes" id="btnOpenEnvelopes" onclick="openEnvelopeManagerModal()" title="Manage Budget Envelopes">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path>
+                    <polyline points="22,6 12,13 2,6"></polyline>
+                </svg>
+                Envelopes
+            </button>
+            <!-- Settings Gear Action -->
+            <button class="btn-settings" id="btnOpenSettings" onclick="openSettingsModal()" title="Dashboard Settings">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="3"></circle>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                </svg>
+                Settings
+            </button>
+        </div>
+    </header>
+
+    <!-- Section tabs -->
+    <nav class="app-tabs" aria-label="Sections">
+        <button type="button" class="tab-btn" id="tabBtn-import" onclick="showTab('import')">Import</button>
+        <button type="button" class="tab-btn active" id="tabBtn-analytics" onclick="showTab('analytics')">Analytics</button>
+    </nav>
+
+    <!-- Main Content Area -->
+    <main class="dashboard-container">
+
+        <!-- ===================== IMPORT TAB ===================== -->
+        <div class="tab-panel" id="tab-import" hidden>
+
+            <!-- Step 1: choose files -->
+            <section class="import-card">
+                <div class="table-header">
+                    <div>
+                        <div class="table-title">1. Choose bank files</div>
+                        <div class="table-subtitle">Files in the <code>DataFiles\input</code> folder. Drop new CSV exports below to add them. Nothing is saved until step 2.</div>
+                    </div>
+                    <div class="table-header-actions">
+                        <button class="btn-refresh" onclick="importScanFolder()">Refresh folder</button>
+                        <button class="btn-refresh" onclick="openImportRulesModal()">Rules</button>
+                        <button class="btn-refresh" onclick="openReclassifyModal()">Re-run rules&hellip;</button>
+                        <button class="btn-refresh" onclick="openImportHistoryModal()">History</button>
+                    </div>
+                </div>
+
+                <div class="dropzone" id="importDropzone" onclick="document.getElementById('importFileInput').click()">
+                    <div class="dropzone-title">Drop bank or credit card CSV files here, or click to browse</div>
+                    <div class="dropzone-sub">Chase, Wells Fargo, Synchrony, and most other bank exports. Columns are detected automatically.</div>
+                    <input type="file" id="importFileInput" multiple accept=".csv" hidden onchange="importUploadFiles(this.files); this.value = '';">
+                </div>
+
+                <div id="importFileListWrap" hidden>
+                    <div class="import-file-actions">
+                        <span class="control-label">Select:</span>
+                        <button type="button" class="preset-btn" onclick="importSelectFiles('new')">Not yet imported</button>
+                        <button type="button" class="preset-btn" onclick="importSelectFiles('all')">All</button>
+                        <button type="button" class="preset-btn" onclick="importSelectFiles('none')">None</button>
+                        <span class="import-file-count" id="importFileCount"></span>
+                    </div>
+                    <div class="table-responsive-container">
+                        <table class="txn-table import-files-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 40px;"></th>
+                                    <th>File</th>
+                                    <th style="width: 110px;">Modified</th>
+                                    <th style="width: 150px;">Already in database</th>
+                                    <th style="width: 170px;">Account type</th>
+                                    <th style="width: 190px;">Columns</th>
+                                </tr>
+                            </thead>
+                            <tbody id="importFileBody"></tbody>
+                        </table>
+                    </div>
+                    <div class="import-actions-right">
+                        <span class="import-hint" id="importProcessHint"></span>
+                        <button class="btn-modal-save" id="btnImportProcess" onclick="importProcess()">Process &amp; review &rarr;</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Step 2: review -->
+            <section id="importReviewSection" hidden>
+                <div class="kpi-grid kpi-grid-wide" id="importSummary"></div>
+
+                <div id="importDoneBanner" class="import-done" hidden></div>
+
+                <section class="table-card">
+                    <div class="table-header">
+                        <div>
+                            <div class="table-title">2. Review and save</div>
+                            <div class="table-subtitle">Change anything that looks wrong. Rows already in the database are shown for reference and are never changed by an import.</div>
+                        </div>
+                        <div class="table-header-actions">
+                            <input type="text" id="importSearch" class="input-text import-search" placeholder="Search payee, envelope, amount&hellip;" oninput="importRenderGrid()">
+                        </div>
+                    </div>
+
+                    <div class="import-chips" id="importChips"></div>
+
+                    <div class="table-responsive-container import-grid-wrap">
+                        <table class="txn-table import-grid">
+                            <thead>
+                                <tr>
+                                    <th style="width: 44px; text-align: center;" title="Untick to leave a new row out of this import">Save</th>
+                                    <th style="width: 44px; text-align: center;" title="Count this row in budget reports">Incl</th>
+                                    <th onclick="importSortBy('date')" style="width: 110px;">Date <span id="isort_date" class="sort-indicator">&#9660;</span></th>
+                                    <th onclick="importSortBy('name')">Payee <span id="isort_name" class="sort-indicator"></span></th>
+                                    <th onclick="importSortBy('amount')" style="text-align: right; width: 110px;">Amount <span id="isort_amount" class="sort-indicator"></span></th>
+                                    <th style="width: 150px;">Kind</th>
+                                    <th style="width: 210px;">Envelope / person</th>
+                                    <th onclick="importSortBy('status')" style="width: 130px;">Status <span id="isort_status" class="sort-indicator"></span></th>
+                                    <th onclick="importSortBy('match_source')" style="width: 150px;">Matched by <span id="isort_match_source" class="sort-indicator"></span></th>
+                                    <th style="width: 44px;"></th>
+                                </tr>
+                            </thead>
+                            <tbody id="importGridBody"></tbody>
+                        </table>
+                    </div>
+
+                    <div class="import-save-bar">
+                        <span id="importSaveHint" class="import-hint"></span>
+                        <button class="btn-modal-save" id="btnImportCommit" onclick="importCommit()">Save to database</button>
+                    </div>
+                </section>
+            </section>
+        </div>
+
+        <!-- ===================== ANALYTICS TAB ===================== -->
+        <div class="tab-panel" id="tab-analytics">
+
+        <!-- Controls: Timeframe Presets & Multi-criteria Filters -->
+        <section class="controls-card">
+            <!-- Preset Timeframe Buttons -->
+            <div class="presets-row">
+                <span class="control-label">Preset:</span>
+                <button class="preset-btn" data-preset="this_week" onclick="applyPreset('this_week')">This Week</button>
+                <button class="preset-btn" data-preset="last_week" onclick="applyPreset('last_week')">Last Week</button>
+                <button class="preset-btn" data-preset="this_month" onclick="applyPreset('this_month')">This Month</button>
+                <button class="preset-btn" data-preset="last_month" onclick="applyPreset('last_month')">Last Month</button>
+                <button class="preset-btn" data-preset="this_year" onclick="applyPreset('this_year')">This Year</button>
+                <button class="preset-btn" data-preset="last_year" onclick="applyPreset('last_year')">Last Year</button>
+                <button class="preset-btn" data-preset="last_7_days" onclick="applyPreset('last_7_days')">Last 7 Days</button>
+                <button class="preset-btn active" data-preset="last_30_days" onclick="applyPreset('last_30_days')">Last 30 Days</button>
+                <button class="preset-btn" data-preset="ytd" onclick="applyPreset('ytd')">Year to Date</button>
+                <button class="preset-btn" data-preset="last_365_days" onclick="applyPreset('last_365_days')">Last 365 Days</button>
+                <button class="preset-btn" data-preset="all_time" onclick="applyPreset('all_time')">All Time</button>
+            </div>
+
+            <!-- Detailed Filters Grid -->
+            <div class="filters-grid">
+                <!-- Search Box with Regex Support & Help Tooltip -->
+                <div class="field-group search-field-group">
+                    <div class="field-label-row">
+                        <label for="filterSearch">Search Payee / Note / ID</label>
+                        <div class="regex-tooltip-wrap" id="regexTooltipWrap">
+                            <button type="button" class="regex-help-btn" id="btnRegexHelp" onclick="toggleRegexHelp(event)" aria-label="Regex search help" title="Regex search guide & tips">?</button>
+                            <div class="regex-popover" id="regexPopover" role="tooltip">
+                                <div class="regex-popover-header">
+                                    <span class="regex-popover-title">Regex Search Syntax</span>
+                                    <span class="regex-popover-badge">Case-Insensitive</span>
+                                </div>
+                                <div class="regex-popover-body">
+                                    <div class="regex-tip-row">
+                                        <code>pay|venmo</code>
+                                        <span>Matches <strong>PayPal</strong> or <strong>Venmo</strong> (OR)</span>
+                                    </div>
+                                    <div class="regex-tip-row">
+                                        <code>^Pay</code>
+                                        <span>Starts with <strong>Pay</strong> (e.g. PayPal, not Bill Pay)</span>
+                                    </div>
+                                    <div class="regex-tip-row">
+                                        <code>Pay$</code>
+                                        <span>Ends with <strong>Pay</strong> (e.g. Bill Pay)</span>
+                                    </div>
+                                    <div class="regex-tip-row">
+                                        <code>gas.*kroger</code>
+                                        <span>Words with any characters between</span>
+                                    </div>
+                                    <div class="regex-tip-row">
+                                        <code>\d{4}</code>
+                                        <span>Matches 4 digits (e.g. check # or ID)</span>
+                                    </div>
+                                    <div class="regex-tip-row">
+                                        <code>^((?!transfer).)*$</code>
+                                        <span>Exclude transactions matching "transfer"</span>
+                                    </div>
+                                </div>
+                                <div class="regex-popover-footer">
+                                    <a href="https://regexr.com" target="_blank" rel="noopener noreferrer" class="regex-external-link">
+                                        <span>Interactive guide & tester at <strong>RegExr.com</strong></span>
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                                            <polyline points="15 3 21 3 21 9"></polyline>
+                                            <line x1="10" y1="14" x2="21" y2="3"></line>
+                                        </svg>
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <input type="text" id="filterSearch" class="input-text" placeholder="Search (supports regex, e.g. pay|venmo, ^Pay)..." oninput="onFilterChange()">
+                </div>
+
+                <!-- Envelope / Category Dropdown -->
+                <div class="field-group">
+                    <label for="filterEnvelope">Envelope / Category</label>
+                    <select id="filterEnvelope" class="select-input" onchange="onFilterChange()">
+                        <option value="">All Envelopes</option>
+                    </select>
+                </div>
+
+                <!-- Start Date -->
+                <div class="field-group">
+                    <label for="filterStartDate">Start Date</label>
+                    <input type="date" id="filterStartDate" class="input-date" onchange="onCustomDateChange()">
+                </div>
+
+                <!-- End Date -->
+                <div class="field-group">
+                    <label for="filterEndDate">End Date</label>
+                    <input type="date" id="filterEndDate" class="input-date" onchange="onCustomDateChange()">
+                </div>
+
+                <!-- Kind Filter -->
+                <div class="field-group">
+                    <label for="filterKind">Kind</label>
+                    <select id="filterKind" class="select-input" onchange="onFilterChange()">
+                        <option value="">All Kinds</option>
+                        <option value="__INCOME__">Income (paycheck + other)</option>
+                        <option value="__NEEDS_REVIEW__">Needs review</option>
+                        <option value="expense">Expense</option>
+                        <option value="refund">Refund / reimbursement</option>
+                        <option value="paycheck">Paycheck</option>
+                        <option value="other_income">Other income</option>
+                        <option value="transfer">Transfer</option>
+                        <option value="cc_payment">Card payment</option>
+                    </select>
+                </div>
+
+                <!-- Person Filter -->
+                <div class="field-group">
+                    <label for="filterPerson">Person</label>
+                    <select id="filterPerson" class="select-input" onchange="onFilterChange()">
+                        <option value="">Everyone</option>
+                    </select>
+                </div>
+
+                <!-- Inclusion Toggle Filter -->
+                <div class="field-group">
+                    <label>Transaction Inclusion</label>
+                    <div class="segmented-toggle">
+                        <button class="segmented-btn active" id="btnIncOnly" onclick="setInclusionFilter('included')">Included</button>
+                        <button class="segmented-btn" id="btnIncAll" onclick="setInclusionFilter('all')">All</button>
+                        <button class="segmented-btn" id="btnIncExcluded" onclick="setInclusionFilter('excluded')">Excluded</button>
+                    </div>
+                </div>
+
+                <!-- Clear Filters Button -->
+                <button class="btn-clear" id="btnClearFilters" onclick="clearFilterCriteria()" title="Clear search and category filters without changing timeframe">Clear</button>
+            </div>
+        </section>
+
+        <!-- KPI Summary Metric Tiles -->
+        <section class="kpi-grid">
+            <!-- Total Income Card -->
+            <div class="kpi-card income">
+                <div class="kpi-header">
+                    <span class="kpi-title">Total Income</span>
+                    <span class="kpi-badge badge-positive" id="kpiIncomeBadge">Inflows</span>
+                </div>
+                <div class="kpi-value income" id="kpiTotalIncome">$0.00</div>
+                <div class="kpi-subtitle" id="kpiIncomeCount">0 income deposits</div>
+            </div>
+
+            <!-- Total Spend Card -->
+            <div class="kpi-card spend">
+                <div class="kpi-header">
+                    <span class="kpi-title">Total Spend</span>
+                    <span class="kpi-badge badge-negative" id="kpiSpendBadge">Expenses</span>
+                </div>
+                <div class="kpi-value spend" id="kpiTotalSpend">$0.00</div>
+                <div class="kpi-subtitle" id="kpiSpendCount">0 expense records</div>
+            </div>
+
+            <!-- Net Cashflow / Savings Card -->
+            <div class="kpi-card net">
+                <div class="kpi-header">
+                    <span class="kpi-title">Net Cashflow</span>
+                    <span class="kpi-badge badge-neutral" id="kpiSavingsRate">0% Saved</span>
+                </div>
+                <div class="kpi-value net" id="kpiNetSavings">$0.00</div>
+                <div class="kpi-subtitle" id="kpiNetDescription">Income minus spend</div>
+            </div>
+
+            <!-- Filtered Records Count -->
+            <div class="kpi-card count">
+                <div class="kpi-header">
+                    <span class="kpi-title">Transactions</span>
+                    <span class="kpi-badge badge-neutral" id="kpiTotalCountBadge">Active View</span>
+                </div>
+                <div class="kpi-value count" id="kpiFilteredCount">0</div>
+                <div class="kpi-subtitle" id="kpiTotalDatabaseCount">Total in localstore: 0</div>
+            </div>
+        </section>
+
+        <!-- Charts Row 1: Income vs Spend & Category Breakdown -->
+        <section class="charts-grid">
+            <!-- Chart 1: Income vs Spend -->
+            <div class="chart-card">
+                <div class="chart-header">
+                    <div class="chart-title-area">
+                        <div class="chart-title">Income vs. Spend</div>
+                        <div class="chart-subtitle">Direct comparison • Click bar to filter</div>
+                    </div>
+                </div>
+                <div class="chart-canvas-container">
+                    <canvas id="chartIncomeSpend"></canvas>
+                </div>
+            </div>
+
+            <!-- Chart 2: Spend Breakdown (Category vs Payee) -->
+            <div class="chart-card">
+                <div class="chart-header">
+                    <div class="chart-title-area">
+                        <div class="chart-title" id="chartBreakdownTitle">Spend by Category</div>
+                        <div class="chart-subtitle" id="chartBreakdownSubtitle">Expense distribution • Click slice to drill down</div>
+                    </div>
+                    <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+                        <button class="btn-refresh" id="btnBackToCategories" style="display: none; padding: 4px 8px; font-size: 11.5px;" onclick="exitCategoryDrilldown()">
+                            ← All Categories
+                        </button>
+                        <div class="segmented-toggle">
+                            <button class="segmented-btn active" id="btnBreakdownCategory" onclick="setBreakdownMode('category')">Category</button>
+                            <button class="segmented-btn" id="btnBreakdownPayee" onclick="setBreakdownMode('payee')">Payee</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="chart-canvas-container">
+                    <canvas id="chartCategorySpend"></canvas>
+                </div>
+            </div>
+
+            <!-- Chart 3: Spending Over Time (Full Width) -->
+            <div class="chart-card chart-card-full">
+                <div class="chart-header">
+                    <div class="chart-title-area">
+                        <div class="chart-title">Spending Over Time</div>
+                        <div class="chart-subtitle" id="chartTimeSubtitle">Spending intervals • Click any bar to drill down</div>
+                    </div>
+                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                        <!-- Time Granularity Selector -->
+                        <div class="segmented-toggle">
+                            <button class="segmented-btn" id="btnGranDaily" onclick="setGranularity('daily')">Daily</button>
+                            <button class="segmented-btn" id="btnGranWeekly" onclick="setGranularity('weekly')">Weekly</button>
+                            <button class="segmented-btn" id="btnGranMonthly" onclick="setGranularity('monthly')">Monthly</button>
+                        </div>
+                        <!-- Stacked Mode Selector -->
+                        <div class="segmented-toggle">
+                            <button class="segmented-btn active" id="btnStackTotal" onclick="setSpendingStackMode('total')">Total Spend</button>
+                            <button class="segmented-btn" id="btnStackCategory" onclick="setSpendingStackMode('stacked')">Stacked</button>
+                            <button class="segmented-btn" id="btnStackPercent" onclick="setSpendingStackMode('percent')">% Stacked</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="chart-canvas-container tall">
+                    <canvas id="chartTimeSpend"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- Interactive Transaction Table with Infinite Scrolling & Audit Action -->
+        <section class="table-card">
+            <div class="table-header">
+                <div>
+                    <div class="table-title">Transaction Records</div>
+                    <div class="table-subtitle">Click on any transaction row to view details or edit fields</div>
+                </div>
+                <div class="table-header-actions">
+                    <button class="btn-audit" id="btnAuditList" onclick="startAuditProcess()" title="Review filtered list for duplicates or incorrect records">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                            <line x1="11" y1="8" x2="11" y2="14"></line>
+                            <line x1="8" y1="11" x2="14" y2="11"></line>
+                        </svg>
+                        Audit Filtered List
+                    </button>
+                    <div class="table-count-badge" id="tableRecordCountDisplay">Showing 0 of 0 records</div>
+                </div>
+            </div>
+
+            <!-- Bulk Action Toolbar (Appears when transactions are selected) -->
+            <div class="bulk-action-bar" id="bulkActionBar" style="display: none;">
+                <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                    <span class="bulk-selected-badge" id="bulkSelectedCount">0 selected</span>
+                    <button type="button" class="btn-bulk-action" onclick="openBulkModal('payee')">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+                        Change Payee Description
+                    </button>
+                    <button type="button" class="btn-bulk-action" onclick="openBulkModal('envelope')">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                        Change Envelope / Category
+                    </button>
+                    <button type="button" class="btn-bulk-action" onclick="openBulkModal('status')">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+                        Change Status
+                    </button>
+                    <button type="button" class="btn-bulk-action" onclick="openBulkModal('kind')">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>
+                        Change Kind
+                    </button>
+                </div>
+                <button type="button" class="btn-bulk-clear" onclick="clearAllSelections()">
+                    ✕ Clear Selection
+                </button>
+            </div>
+
+            <div class="table-responsive-container">
+                <table class="txn-table" id="transactionTable">
+                    <thead>
+                        <tr>
+                            <th style="width: 44px; text-align: center;">
+                                <input type="checkbox" id="selectAllCheckbox" class="txn-checkbox" onchange="toggleSelectAll(this.checked)" title="Select all visible">
+                            </th>
+                            <th onclick="sortTable('date')">Date <span id="sort_date" class="sort-indicator">▼</span></th>
+                            <th onclick="sortTable('name')">Payee / Description <span id="sort_name" class="sort-indicator"></span></th>
+                            <th onclick="sortTable('envelope')">Envelope / Category <span id="sort_envelope" class="sort-indicator"></span></th>
+                            <th onclick="sortTable('account_type')">Account <span id="sort_account_type" class="sort-indicator"></span></th>
+                            <th onclick="sortTable('amount')" style="text-align: right;">Amount <span id="sort_amount" class="sort-indicator"></span></th>
+                            <th onclick="sortTable('is_included')">Status <span id="sort_is_included" class="sort-indicator"></span></th>
+                            <th onclick="sortTable('txn_id')">Txn ID <span id="sort_txn_id" class="sort-indicator"></span></th>
+                        </tr>
+                    </thead>
+                    <tbody id="transactionTableBody">
+                        <!-- Dynamically populated via JavaScript -->
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Infinite Scroll Loading Sentinel -->
+            <div class="table-scroll-sentinel" id="scrollSentinel">
+                Showing all records matching your filters.
+            </div>
+        </section>
+
+        </div>
+    </main>
+
+    <!-- Floating Back to Top Button -->
+    <button class="btn-back-to-top" id="btnBackToTop" onclick="scrollToTop()" title="Back to top">
+        ↑
+    </button>
+
+    <!-- Transaction Detail & Edit Modal Dialog -->
+    <div class="modal-overlay" id="editModalOverlay" onclick="handleModalOverlayClick(event)">
+        <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title" id="modalTitle">Transaction Details & Editor</div>
+                    <div class="modal-subtitle">Review raw metadata and modify transaction details</div>
+                </div>
+                <button class="modal-close-btn" onclick="closeEditModal()" title="Close">&times;</button>
+            </div>
+
+            <div class="modal-body">
+                <!-- Immutable System & Ingestion Details -->
+                <div class="info-panel">
+                    <div class="info-item">
+                        <span class="info-label">Transaction ID</span>
+                        <span class="info-value mono" id="modalTxnId">—</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Source File</span>
+                        <span class="info-value" id="modalSourceFile">—</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Raw Description (from Bank)</span>
+                        <span class="info-value" id="modalRawName">—</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Match Rule / Source</span>
+                        <span class="info-value" id="modalMatchSource">—</span>
+                    </div>
+                    <div class="info-item full-col">
+                        <span class="info-label">Last Database Update</span>
+                        <span class="info-value" id="modalUpdatedAt">—</span>
+                    </div>
+                </div>
+
+                <!-- Editable Fields Form -->
+                <form id="editTxnForm" onsubmit="saveTransactionEdits(event)">
+                    <div class="modal-form-grid">
+                        <!-- Payee Name -->
+                        <div class="field-group full-col">
+                            <label for="editName">Payee / Description</label>
+                            <input type="text" id="editName" class="input-text" required>
+                        </div>
+
+                        <!-- Envelope / Category -->
+                        <div class="field-group">
+                            <label for="editEnvelope">Envelope / Category</label>
+                            <select id="editEnvelope" class="select-input">
+                                <option value="">(Leave Blank for Inflows / Unallocated)</option>
+                            </select>
+                        </div>
+
+                        <!-- Account Type -->
+                        <div class="field-group">
+                            <label for="editAccountType">Account Type</label>
+                            <select id="editAccountType" class="select-input">
+                                <option value="Bank / Checking">Bank / Checking</option>
+                                <option value="Credit Card">Credit Card</option>
+                                <option value="Savings">Savings</option>
+                                <option value="Other">Other</option>
+                            </select>
+                        </div>
+
+                        <!-- Date -->
+                        <div class="field-group">
+                            <label for="editDate">Transaction Date</label>
+                            <input type="date" id="editDate" class="input-date" required>
+                        </div>
+
+                        <!-- Amount -->
+                        <div class="field-group">
+                            <label for="editAmount">Amount ($) <span style="font-weight: 400; font-size: 11px; color: var(--text-dim);">(Negative = Spend, Positive = Inflow/Refund)</span></label>
+                            <input type="number" step="0.01" id="editAmount" class="input-number" required>
+                        </div>
+
+                        <!-- Check Number -->
+                        <div class="field-group">
+                            <label for="editCheckNum">Check #</label>
+                            <input type="text" id="editCheckNum" class="input-text" placeholder="Optional check number">
+                        </div>
+
+                        <!-- Exclusion Reason -->
+                        <div class="field-group">
+                            <label for="editExclusionReason">Exclusion Reason</label>
+                            <input type="text" id="editExclusionReason" class="input-text" placeholder="Reason if excluded (e.g. CC Payment)">
+                        </div>
+
+                        <!-- Kind -->
+                        <div class="field-group">
+                            <label for="editKind">Kind</label>
+                            <select id="editKind" class="select-input" onchange="onEditKindChange()">
+                                <option value="expense">Expense</option>
+                                <option value="refund">Refund / reimbursement</option>
+                                <option value="paycheck">Paycheck</option>
+                                <option value="other_income">Other income</option>
+                                <option value="transfer">Transfer (excluded)</option>
+                                <option value="cc_payment">Card payment (excluded)</option>
+                            </select>
+                        </div>
+
+                        <!-- Person (income) -->
+                        <div class="field-group" id="editPersonWrap">
+                            <label for="editPerson">Person</label>
+                            <select id="editPerson" class="select-input">
+                                <option value="">(Not set)</option>
+                            </select>
+                        </div>
+
+                        <!-- Paycheck subtype -->
+                        <div class="field-group" id="editSubtypeWrap">
+                            <label for="editSubtype">Paycheck type</label>
+                            <select id="editSubtype" class="select-input">
+                                <option value="regular">Regular</option>
+                                <option value="bonus">Bonus (left out of planning income)</option>
+                            </select>
+                        </div>
+
+                        <!-- Income label -->
+                        <div class="field-group" id="editIncomeLabelWrap">
+                            <label for="editIncomeLabel">Income label</label>
+                            <input type="text" id="editIncomeLabel" class="input-text" placeholder="e.g. Tax Refund">
+                        </div>
+
+                        <!-- Reimbursement link -->
+                        <div class="field-group full-col" id="editReimburseWrap">
+                            <label>Pays back an expense</label>
+                            <div class="reimburse-row">
+                                <span id="editReimburseInfo" class="reimburse-info">Not linked</span>
+                                <button type="button" class="btn-bulk-action" onclick="openMatchForEditModal()">Match to expense&hellip;</button>
+                                <button type="button" class="btn-inline-action btn-inline-cancel" onclick="clearEditReimbursement()">Unlink</button>
+                            </div>
+                        </div>
+
+                        <!-- Review flag -->
+                        <div class="field-group full-col">
+                            <div class="checkbox-row">
+                                <input type="checkbox" id="editNeedsReview">
+                                <label for="editNeedsReview">Needs review (shows under Kind &rarr; Needs review)</label>
+                            </div>
+                        </div>
+
+                        <!-- Inclusion Status Checkbox -->
+                        <div class="field-group full-col">
+                            <div class="checkbox-row">
+                                <input type="checkbox" id="editIsIncluded" onchange="onInclusionCheckboxToggle()">
+                                <label for="editIsIncluded">Include in Budget & Reports (is_included = 1)</label>
+                            </div>
+                        </div>
+                    </div>
+                </form>
+            </div>
+
+            <div class="modal-footer">
+                <div class="modal-footer-msg" id="modalFooterStatus">Changes update the database for this transaction only.</div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-modal-cancel" onclick="closeEditModal()">Cancel</button>
+                    <button type="button" class="btn-modal-save" id="btnSaveModal" onclick="submitModalForm()">
+                        Save Changes
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Audit Comparison Modal Dialog -->
+    <div class="modal-overlay" id="auditModalOverlay" onclick="handleAuditOverlayClick(event)">
+        <div class="modal-container wide" role="dialog" aria-modal="true" aria-labelledby="auditModalTitle">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title" id="auditModalTitle">Audit Review: Duplicates & Verification</div>
+                    <div class="modal-subtitle" id="auditModalSubtitle">Comparing potential duplicate records</div>
+                </div>
+                <button class="modal-close-btn" onclick="closeAuditModal()" title="Exit Audit">&times;</button>
+            </div>
+
+            <div class="modal-body" id="auditModalBody">
+                <!-- Dynamically populated via renderCurrentAuditCandidate() -->
+            </div>
+
+            <div class="modal-footer" id="auditModalFooter">
+                <!-- Dynamically populated footer action buttons -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Bulk Action Modal Dialog -->
+    <div class="modal-overlay" id="bulkModalOverlay" onclick="handleBulkOverlayClick(event)">
+        <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="bulkModalTitle" style="max-width: 580px;">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title" id="bulkModalTitle">Bulk Update Transactions</div>
+                    <div class="modal-subtitle" id="bulkModalSubtitle">Modify payee, envelope, status, and kind across selected records</div>
+                </div>
+                <button class="modal-close-btn" onclick="closeBulkModal()" title="Close">&times;</button>
+            </div>
+
+            <div class="modal-body">
+                <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">
+                    Updating <strong id="bulkModalCount" style="color: var(--accent-blue);">0 transactions</strong> simultaneously. Check the box next to any property you wish to change.
+                </div>
+
+                <!-- Option 1: Payee Description -->
+                <div style="background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 8px; padding: 14px; margin-bottom: 12px;">
+                    <div class="checkbox-row" style="margin-bottom: 8px;">
+                        <input type="checkbox" id="bulkApplyPayee" onchange="toggleBulkField('payee')">
+                        <label for="bulkApplyPayee" style="font-weight: 600; cursor: pointer;">Change Payee Description</label>
+                    </div>
+                    <div id="bulkPayeeFieldWrap" style="opacity: 0.5; pointer-events: none; transition: opacity 0.2s ease;">
+                        <input type="text" id="bulkPayeeInput" class="input-text" placeholder="e.g. PLANET FITNESS">
+                        <div style="font-size: 11px; color: var(--text-dim); margin-top: 4px;">Sets the clean friendly payee name for display and grouping, keeping raw bank descriptions intact for search.</div>
+                    </div>
+                </div>
+
+                <!-- Option 2: Envelope / Category -->
+                <div style="background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 8px; padding: 14px; margin-bottom: 12px;">
+                    <div class="checkbox-row" style="margin-bottom: 8px;">
+                        <input type="checkbox" id="bulkApplyEnvelope" onchange="toggleBulkField('envelope')">
+                        <label for="bulkApplyEnvelope" style="font-weight: 600; cursor: pointer;">Change Envelope / Category</label>
+                    </div>
+                    <div id="bulkEnvelopeFieldWrap" style="opacity: 0.5; pointer-events: none; transition: opacity 0.2s ease;">
+                        <select id="bulkEnvelopeSelect" class="input-select">
+                            <!-- Dynamically populated -->
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Option 3: Status -->
+                <div style="background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 8px; padding: 14px; margin-bottom: 16px;">
+                    <div class="checkbox-row" style="margin-bottom: 8px;">
+                        <input type="checkbox" id="bulkApplyStatus" onchange="toggleBulkField('status')">
+                        <label for="bulkApplyStatus" style="font-weight: 600; cursor: pointer;">Change Status</label>
+                    </div>
+                    <div id="bulkStatusFieldWrap" style="opacity: 0.5; pointer-events: none; transition: opacity 0.2s ease; display: flex; flex-direction: column; gap: 8px;">
+                        <select id="bulkStatusSelect" class="input-select" onchange="onBulkStatusChange()">
+                            <option value="1">Included in Budget & Reports (is_included = 1)</option>
+                            <option value="0">Excluded from Budget & Reports (is_included = 0)</option>
+                        </select>
+                        <input type="text" id="bulkExclusionReason" class="input-text" placeholder="Exclusion reason (e.g. CC Payment / Internal Transfer)" style="display: none;">
+                    </div>
+                </div>
+
+                <!-- Option 4: Kind / person -->
+                <div style="background: var(--bg-card-subtle); border: 1px solid var(--border-color); border-radius: 8px; padding: 14px; margin-bottom: 16px;">
+                    <div class="checkbox-row" style="margin-bottom: 8px;">
+                        <input type="checkbox" id="bulkApplyKind" onchange="toggleBulkField('kind')">
+                        <label for="bulkApplyKind" style="font-weight: 600; cursor: pointer;">Change Kind</label>
+                    </div>
+                    <div id="bulkKindFieldWrap" style="opacity: 0.5; pointer-events: none; transition: opacity 0.2s ease; display: flex; flex-direction: column; gap: 8px;">
+                        <select id="bulkKindSelect" class="input-select" onchange="onBulkKindChange()">
+                            <option value="expense">Expense</option>
+                            <option value="refund">Refund / reimbursement</option>
+                            <option value="paycheck">Paycheck</option>
+                            <option value="other_income">Other income</option>
+                            <option value="transfer">Transfer (excluded)</option>
+                            <option value="cc_payment">Card payment (excluded)</option>
+                        </select>
+                        <select id="bulkPersonSelect" class="input-select" style="display: none;">
+                            <option value="">(Person not set)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Rule Persistence Box: Always Do This -->
+                <div class="rule-persist-box">
+                    <div class="checkbox-row">
+                        <input type="checkbox" id="bulkAlwaysDoThis" onchange="onToggleBulkSaveRule()">
+                        <label for="bulkAlwaysDoThis" style="font-weight: 600; cursor: pointer; color: var(--accent-blue);">
+                            Always do this (Save rule for future imports)
+                        </label>
+                    </div>
+                    <div id="bulkRuleInputsWrap" style="display: none; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border-color);">
+                        <label style="font-size: 11.5px; font-weight: 500; color: var(--text-muted); display: block; margin-bottom: 4px;">
+                            Match Keyword / Pattern in Raw Bank Description:
+                        </label>
+                        <input type="text" id="bulkRulePhrase" class="input-text" placeholder="e.g. PLANET FITNESS">
+                        <div style="font-size: 11px; color: var(--text-dim); margin-top: 4px;">
+                            Future CSV imports matching this phrase will automatically assign this clean payee, envelope, and status.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <div class="modal-footer-msg" id="bulkModalStatusMsg">Select at least one change to apply.</div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-modal-cancel" onclick="closeBulkModal()">Cancel</button>
+                    <button type="button" class="btn-modal-save" id="btnSaveBulkModal" onclick="submitBulkModalForm()">
+                        Apply Bulk Updates
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dashboard Settings Modal with Theme Picker -->
+    <div class="modal-overlay" id="settingsModalOverlay" onclick="handleSettingsOverlayClick(event)">
+        <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle" style="max-width: 540px;">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title" id="settingsModalTitle">Dashboard Settings</div>
+                    <div class="modal-subtitle">Appearance and color theme options</div>
+                </div>
+                <button class="modal-close-btn" onclick="closeSettingsModal()" title="Close">&times;</button>
+            </div>
+
+            <div class="modal-body">
+                <div class="settings-section">
+                    <label class="settings-label">Color Theme</label>
+                    <div class="theme-options-grid">
+                        <!-- Dark Theme Option -->
+                        <div class="theme-card" id="themeCardDark" onclick="applyTheme('dark')">
+                            <div class="theme-preview dark-preview">
+                                <span class="preview-dot" style="background: #3b82f6;"></span>
+                                <span class="preview-dot" style="background: #10b981;"></span>
+                                <span class="preview-dot" style="background: #ef4444;"></span>
+                            </div>
+                            <div class="theme-info">
+                                <div class="theme-name">Dark</div>
+                                <div class="theme-desc">Modern midnight slate dark mode with high-contrast neon accents</div>
+                            </div>
+                            <span class="theme-check" id="themeCheckDark">✓</span>
+                        </div>
+
+                        <!-- Greenback Theme Option -->
+                        <div class="theme-card" id="themeCardGreenback" onclick="applyTheme('greenback')">
+                            <div class="theme-preview greenback-preview">
+                                <span class="preview-dot" style="background: #22c55e;"></span>
+                                <span class="preview-dot" style="background: #38bdf8;"></span>
+                                <span class="preview-dot" style="background: #facc15;"></span>
+                            </div>
+                            <div class="theme-info">
+                                <div class="theme-name">Greenback</div>
+                                <div class="theme-desc">Modern US currency palette: engraved bill forest green, gold seal, and 3D ribbon cyan</div>
+                            </div>
+                            <span class="theme-check" id="themeCheckGreenback">✓</span>
+                        </div>
+
+                        <!-- Ledger Theme Option -->
+                        <div class="theme-card" id="themeCardLedger" onclick="applyTheme('ledger')">
+                            <div class="theme-preview ledger-preview">
+                                <span class="preview-dot" style="background: #15803d;"></span>
+                                <span class="preview-dot" style="background: #1d4ed8;"></span>
+                                <span class="preview-dot" style="background: #b91c1c;"></span>
+                            </div>
+                            <div class="theme-info">
+                                <div class="theme-name">Ledger</div>
+                                <div class="theme-desc">Bank accounting ledger: warm cream paper, ruled ink borders, and credit/debit accents</div>
+                            </div>
+                            <span class="theme-check" id="themeCheckLedger">✓</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <div class="modal-footer-msg">Selected theme is saved to your browser automatically.</div>
+                <button type="button" class="btn-modal-save" onclick="closeSettingsModal()">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Envelope Manager Modal Overlay -->
+    <div class="modal-overlay" id="envelopeModalOverlay" onclick="handleEnvelopeModalOverlayClick(event)">
+        <div class="modal-container envelope-manager-modal">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title">Budget Envelope Manager</div>
+                    <div class="modal-subtitle">Add, rename, or remove envelopes and monitor transaction volume per category.</div>
+                </div>
+                <button class="modal-close-btn" onclick="closeEnvelopeManagerModal()" title="Close">&times;</button>
+            </div>
+
+            <div class="modal-body">
+                <!-- Add New Envelope Card -->
+                <div class="add-envelope-card">
+                    <label for="newEnvelopeInput" style="font-size: 12.5px; font-weight: 600; color: var(--text-muted);">Create New Envelope</label>
+                    <div class="add-envelope-bar">
+                        <input type="text" id="newEnvelopeInput" class="input-text" placeholder="Enter envelope name (e.g. Vacation, Healthcare, Utilities)..." onkeydown="if(event.key==='Enter') submitAddEnvelope()">
+                        <button type="button" class="btn-modal-save" onclick="submitAddEnvelope()">+ Add</button>
+                    </div>
+                </div>
+
+                <!-- Toolbar: Search & Summary -->
+                <div class="envelope-toolbar">
+                    <div class="envelope-search-wrap">
+                        <input type="text" id="envSearchFilter" placeholder="Search envelopes..." oninput="renderEnvelopeManagerList()">
+                    </div>
+                    <div class="envelope-summary-chip" id="envSummaryCount">0 envelopes</div>
+                </div>
+
+                <!-- Envelope List Table -->
+                <div class="envelope-list-wrap">
+                    <table class="envelope-list-table">
+                        <thead>
+                            <tr>
+                                <th>Envelope Name</th>
+                                <th style="width: 140px;">Transactions</th>
+                                <th style="width: 120px; text-align: right;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="envelopeListTbody">
+                            <!-- Populated dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <div class="modal-footer-msg">Changes to envelopes automatically sync across your database and views.</div>
+                <button type="button" class="btn-modal-save" onclick="closeEnvelopeManagerModal()">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Envelope Delete Warning & Reassignment Modal Overlay -->
+    <div class="modal-overlay" id="deleteEnvelopeModalOverlay" onclick="handleDeleteModalOverlayClick(event)">
+        <div class="modal-container" style="max-width: 540px;">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title" style="color: var(--accent-amber);">Delete Envelope Confirmation</div>
+                    <div class="modal-subtitle">Resolve existing transaction assignments before removing this category.</div>
+                </div>
+                <button class="modal-close-btn" onclick="closeDeleteEnvelopeModal()" title="Close">&times;</button>
+            </div>
+
+            <div class="modal-body">
+                <!-- Warning Banner -->
+                <div class="delete-warning-banner">
+                    <div class="delete-warning-icon">⚠️</div>
+                    <div>
+                        <div class="delete-warning-title">
+                            "<span id="deleteEnvTargetName"></span>" has <span id="deleteEnvTxnCount"></span> transactions tagged to it.
+                        </div>
+                        <div class="delete-warning-sub">
+                            Deleting this envelope will leave these transactions without their category. Choose how you would like to handle them:
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Reassignment Options Card -->
+                <div class="reassign-card">
+                    <!-- Option 1: Reassign to another envelope -->
+                    <div class="reassign-option">
+                        <label class="reassign-option-row">
+                            <input type="radio" name="deleteHandling" id="optReassign" value="reassign" checked onchange="toggleDeleteHandlingMode()">
+                            <span class="reassign-option-text">Reassign all transactions to an existing envelope:</span>
+                        </label>
+                        <div class="reassign-dropdown-wrap" id="reassignSelectWrap">
+                            <select id="deleteReassignTargetSelect" class="select-input" style="width: 100%;">
+                                <!-- Populated dynamically with other envelopes -->
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Option 2: Set to Unallocated (clear envelope) -->
+                    <div class="reassign-option">
+                        <label class="reassign-option-row">
+                            <input type="radio" name="deleteHandling" id="optUnallocated" value="unallocated" onchange="toggleDeleteHandlingMode()">
+                            <span class="reassign-option-text">Set all transactions to Unallocated (clears envelope)</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <div class="modal-footer-msg">This will update all affected records in your local store.</div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-modal-cancel" onclick="closeDeleteEnvelopeModal()">Cancel</button>
+                    <button type="button" class="btn-modal-danger" id="btnConfirmDeleteEnvelope" onclick="confirmDeleteEnvelopeWithReassign()">
+                        Confirm & Delete
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Floating Toast Notification -->
+    <div class="toast-notification" id="toastNotification">
+        Transaction updated successfully!
+    </div>
+
+    <!-- Match a reimbursement to the expense it pays back -->
+    <div class="modal-overlay" id="matchModalOverlay" onclick="handleMatchOverlayClick(event)">
+        <div class="modal-container" role="dialog" aria-modal="true" style="max-width: 640px;">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title">Match to expense</div>
+                    <div class="modal-subtitle" id="matchModalInfo">Reimbursement</div>
+                </div>
+                <button class="modal-close-btn" onclick="closeMatchModal()" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="match-help">Pick the expense this money pays back. It takes that expense's envelope and links the two. Expenses from the 60 days before the deposit are listed, with likely matches first.</div>
+                <div id="matchModalList" class="match-list"></div>
+            </div>
+            <div class="modal-footer">
+                <div class="modal-footer-msg">Or close this and pick an envelope directly.</div>
+                <button type="button" class="btn-modal-cancel" onclick="closeMatchModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Column mapping -->
+    <div class="modal-overlay" id="mappingModalOverlay" onclick="if (event.target === this) closeMappingModal()">
+        <div class="modal-container" role="dialog" aria-modal="true" style="max-width: 620px;">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title">Column mapping</div>
+                    <div class="modal-subtitle" id="mappingModalFile">File</div>
+                </div>
+                <button class="modal-close-btn" onclick="closeMappingModal()" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-form-grid" id="mappingModalBody"></div>
+            </div>
+            <div class="modal-footer">
+                <div class="modal-footer-msg">Saved for next time for files with the same columns.</div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-modal-cancel" onclick="closeMappingModal()">Cancel</button>
+                    <button type="button" class="btn-modal-save" onclick="saveMappingModal()">Apply</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Rules -->
+    <div class="modal-overlay" id="rulesModalOverlay" onclick="if (event.target === this) closeImportRulesModal()">
+        <div class="modal-container wide" role="dialog" aria-modal="true">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title">Classification rules</div>
+                    <div class="modal-subtitle">Rules decide each row's kind, envelope and payee during import. Yours run first, then known vendors, then built-in rules.</div>
+                </div>
+                <button class="modal-close-btn" onclick="closeImportRulesModal()" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="rules-add">
+                    <input type="text" id="ruleNewPhrase" class="input-text" placeholder="Text to look for (e.g. TARGET)">
+                    <select id="ruleNewAction" class="select-input" onchange="onRuleActionChange()">
+                        <option value="envelope">Send spending to envelope</option>
+                        <option value="refund">Treat as refund to envelope</option>
+                        <option value="other_income">Treat as other income</option>
+                        <option value="transfer">Exclude: transfer</option>
+                        <option value="cc_payment">Exclude: card payment</option>
+                        <option value="payee">Rename payee</option>
+                    </select>
+                    <select id="ruleNewEnvelope" class="select-input"></select>
+                    <input type="text" id="ruleNewPayee" class="input-text" placeholder="New payee name" style="display: none;">
+                    <button type="button" class="btn-modal-save" onclick="addImportRule()">Add rule</button>
+                </div>
+                <div class="rules-toolbar">
+                    <div class="segmented-toggle" id="ruleOriginToggle">
+                        <button class="segmented-btn active" data-origin="user" onclick="setRuleOrigin('user')">Mine</button>
+                        <button class="segmented-btn" data-origin="vendor" onclick="setRuleOrigin('vendor')">Known vendors</button>
+                        <button class="segmented-btn" data-origin="core" onclick="setRuleOrigin('core')">Built-in</button>
+                        <button class="segmented-btn" data-origin="all" onclick="setRuleOrigin('all')">All</button>
+                    </div>
+                    <input type="text" id="ruleSearch" class="input-text" placeholder="Search rules&hellip;" oninput="renderImportRules()">
+                </div>
+                <div class="table-responsive-container rules-table-wrap">
+                    <table class="txn-table">
+                        <thead>
+                            <tr>
+                                <th>Looks for</th>
+                                <th style="width: 150px;">Applies to</th>
+                                <th>Does</th>
+                                <th style="width: 70px; text-align: center;">On</th>
+                                <th style="width: 50px;"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="rulesBody"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="modal-footer-msg" id="rulesFooterMsg">Changes apply to future imports. Use "Re-run rules" to apply them to saved transactions.</div>
+                <button type="button" class="btn-modal-save" onclick="closeImportRulesModal()">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Re-run rules -->
+    <div class="modal-overlay" id="reclassifyModalOverlay" onclick="if (event.target === this) closeReclassifyModal()">
+        <div class="modal-container wide" role="dialog" aria-modal="true">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title">Re-run rules on saved transactions</div>
+                    <div class="modal-subtitle">Preview first. Nothing changes until you press Apply.</div>
+                </div>
+                <button class="modal-close-btn" onclick="closeReclassifyModal()" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="checkbox-row" style="margin-bottom: 12px;">
+                    <input type="checkbox" id="reclassifyIncludeEdited" onchange="runReclassifyPreview()">
+                    <label for="reclassifyIncludeEdited">Also include rows I edited by hand (they are skipped by default)</label>
+                </div>
+                <div id="reclassifySummary" class="reclassify-summary">Checking&hellip;</div>
+                <div class="table-responsive-container rules-table-wrap">
+                    <table class="txn-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 100px;">Date</th>
+                                <th>Payee</th>
+                                <th style="width: 100px; text-align: right;">Amount</th>
+                                <th>What would change</th>
+                            </tr>
+                        </thead>
+                        <tbody id="reclassifyBody"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="modal-footer-msg">A backup of the database is made every time the app upgrades it, not on each change.</div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-modal-cancel" onclick="closeReclassifyModal()">Close</button>
+                    <button type="button" class="btn-modal-save" id="btnReclassifyApply" onclick="applyReclassify()" disabled>Apply changes</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Import history -->
+    <div class="modal-overlay" id="historyModalOverlay" onclick="if (event.target === this) closeImportHistoryModal()">
+        <div class="modal-container" role="dialog" aria-modal="true" style="max-width: 760px;">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title">Import history</div>
+                    <div class="modal-subtitle">The 20 most recent saves</div>
+                </div>
+                <button class="modal-close-btn" onclick="closeImportHistoryModal()" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="table-responsive-container">
+                    <table class="txn-table">
+                        <thead>
+                            <tr>
+                                <th>When</th>
+                                <th>Files</th>
+                                <th style="text-align: right;">New</th>
+                                <th style="text-align: right;">Already there</th>
+                                <th style="text-align: right;">Needs review</th>
+                            </tr>
+                        </thead>
+                        <tbody id="historyBody"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="modal-footer-msg"></div>
+                <button type="button" class="btn-modal-save" onclick="closeImportHistoryModal()">Done</button>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- Application Footer with Required Version Display -->
+    <footer class="app-footer">
+        <div>Budget Tool LocalStore Visualizer & Analytics</div>
+        <div class="footer-version" id="footerVersion">v{{VERSION}}</div>
+    </footer>
+
+    <script src="/web/js/core.js"></script>
+    <script src="/web/js/analytics.js"></script>
+    <script src="/web/js/import.js"></script>
+</body>
+</html>
