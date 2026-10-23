@@ -2,12 +2,13 @@
 
 import mimetypes
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.parser import BytesParser
 from email.policy import HTTP as HTTP_POLICY
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import VERSION, import_engine, paths, reclassify, rules, store
+from . import VERSION, audit, billmatch, budget, import_engine, ledger, income, paths, recurrence, reclassify, rules, store
+from . import envelopes as env_mod
 from .http_util import HttpError, Request, Response, Router
 from .textutil import is_iso_date, to_iso_date
 
@@ -27,6 +28,11 @@ TRANSACTION_FIELDS = [
     "person_id", "income_subtype", "income_label", "bill_id", "needs_review", "user_modified",
     "reimburses_txn_id",
 ]
+
+EDITABLE_SETTINGS = (
+    "bonus_threshold_pct", "suggest_window_spending_months", "suggest_window_bill_months",
+    "bill_match_window_days", "bill_amount_tolerance_pct", "refund_lookback_days",
+)
 
 
 def parse_multipart(content_type: str, body: bytes) -> List[Tuple[str, bytes]]:
@@ -48,6 +54,13 @@ def _envelope_names(conn: Any) -> List[str]:
             "SELECT name FROM envelopes WHERE kind != 'system' AND active = 1 ORDER BY sort_order, id"
         )
     ]
+
+
+def _envelope_kinds(conn: Any) -> Dict[str, Dict[str, Any]]:
+    return {
+        r["name"]: {"id": r["id"], "kind": r["kind"]} for r in conn.execute(
+            "SELECT id, name, kind FROM envelopes WHERE kind != 'system' AND active = 1")
+    }
 
 
 def _find_envelope(conn: Any, name: str) -> Optional[Any]:
@@ -116,8 +129,12 @@ class App:
                 d["needs_review"] = int(d["needs_review"] or 0)
                 d["user_modified"] = int(d["user_modified"] or 0)
                 txns.append(d)
+            funded = {r[0] for r in conn.execute("SELECT income_txn_id FROM allocations WHERE status = 'confirmed' AND income_txn_id IS NOT NULL")}
+            for d in txns:
+                d["funded"] = d["txn_id"] in funded
             return {
                 "version": f"{VERSION:.1f}",
+                "go_live_date": store.get_setting(conn, "go_live_date") or None,
                 "count": len(txns),
                 "envelopes": _envelope_names(conn),
                 "people": [dict(r) for r in conn.execute("SELECT id, name FROM people WHERE active = 1 ORDER BY id")],
@@ -153,6 +170,10 @@ class App:
             if kind not in rules.KINDS:
                 raise HttpError(400, f"Unknown kind '{kind}'")
             included = int(data.get("is_included", row["is_included"]))
+            if kind in rules.EXCLUDED_KINDS:
+                included = 0
+            if not included or kind not in ("paycheck", "other_income"):
+                self._guard_allocation(conn, txn_id, bool(data.get("void_allocation")))
             reason = str(data.get("exclusion_reason", row["exclusion_reason"] or "")).strip()
             if kind in rules.EXCLUDED_KINDS:
                 included = 0
@@ -177,6 +198,13 @@ class App:
             income_source_id = row["income_source_id"]
             if kind == "paycheck":
                 subtype = subtype if subtype in ("regular", "bonus") else "regular"
+                if not income_source_id:
+                    hay = " ".join((row["raw_name"] or "").upper().split())
+                    for src in conn.execute("SELECT id, person_id, match_phrase FROM income_sources WHERE active = 1"):
+                        if src["match_phrase"].upper() in hay and (not person_id or src["person_id"] == int(person_id)):
+                            income_source_id = src["id"]
+                            person_id = person_id or src["person_id"]
+                            break
             else:
                 subtype, income_source_id = None, None
                 if kind != "other_income":
@@ -204,12 +232,24 @@ class App:
         self.sync_csv()
         return {"success": True, "updated_at": now, "txn_id": txn_id}
 
+    def _guard_allocation(self, conn: Any, txn_id: str, void_ok: bool) -> None:
+        """A paycheck that was split across envelopes can't vanish silently: void its fill first."""
+        a = conn.execute("SELECT id FROM allocations WHERE income_txn_id = ? AND status = 'confirmed'", (txn_id,)).fetchone()
+        if a is None:
+            return
+        if not void_ok:
+            raise HttpError(409, "This deposit has been split across envelopes. Undo that fill first.",
+                            needs_void=True, allocation_id=a["id"])
+        ledger.void_allocation(conn, a["id"])
+
     def delete_transaction(self, req: Request) -> Any:
-        txn_id = req.json().get("txn_id", "")
+        body = req.json()
+        txn_id = body.get("txn_id", "")
         if not txn_id:
             raise HttpError(400, "Missing transaction ID")
         conn = self.conn()
         try:
+            self._guard_allocation(conn, txn_id, bool(body.get("void_allocation")))
             row = conn.execute(
                 "SELECT date, raw_name, amount, source_file FROM transactions WHERE txn_id = ?", (txn_id,)
             ).fetchone()
@@ -343,7 +383,7 @@ class App:
             counts: Dict[str, int] = {}
             for r in conn.execute("SELECT envelope, COUNT(*) FROM transactions GROUP BY envelope"):
                 counts[(r[0] or "").strip()] = int(r[1])
-            return {"envelopes": _envelope_names(conn), "counts": counts}
+            return {"envelopes": _envelope_names(conn), "counts": counts, "kinds": _envelope_kinds(conn)}
         finally:
             conn.close()
 
@@ -356,13 +396,19 @@ class App:
             if _find_envelope(conn, name):
                 raise HttpError(400, f"Envelope '{name}' already exists")
             guess = store.guess_envelope_kind(name)
+            kind = str(req.json().get("kind") or "spending")
+            if kind not in env_mod.KINDS:
+                raise HttpError(400, "Unknown envelope type")
+            if kind != "spending":
+                guess["rollover_mode"] = "rollover"
+            guess["kind"] = kind
             order = conn.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM envelopes").fetchone()[0]
             conn.execute(
                 "INSERT INTO envelopes (name, kind, rollover_mode, sort_order) VALUES (?, ?, ?, ?)",
                 (name, guess["kind"], guess["rollover_mode"], order),
             )
             conn.commit()
-            return {"success": True, "envelope": name, "envelopes": _envelope_names(conn)}
+            return {"success": True, "envelope": name, "envelopes": _envelope_names(conn), "kinds": _envelope_kinds(conn)}
         finally:
             conn.close()
 
@@ -387,7 +433,7 @@ class App:
             conn.execute("UPDATE rules SET set_envelope = ? WHERE LOWER(set_envelope) = LOWER(?)", (new, old))
             conn.commit()
             result = {"success": True, "old_name": old, "new_name": new, "renamed_count": cur.rowcount,
-                      "envelopes": _envelope_names(conn)}
+                      "envelopes": _envelope_names(conn), "kinds": _envelope_kinds(conn)}
         finally:
             conn.close()
         self.sync_csv()
@@ -406,6 +452,12 @@ class App:
                 raise HttpError(400, f"Envelope '{name}' not found")
             if reassign_to and _find_envelope(conn, reassign_to) is None:
                 raise HttpError(400, f"Envelope '{reassign_to}' not found")
+            if conn.execute(
+                "SELECT 1 FROM envelope_moves WHERE voided_at IS NULL AND (from_envelope_id = ? OR to_envelope_id = ?)",
+                (row["id"], row["id"])).fetchone():
+                raise HttpError(400, f"'{name}' holds money. Move it out or switch the envelope off on the Budget tab instead.")
+            conn.execute("DELETE FROM bills WHERE envelope_id = ?", (row["id"],))
+            conn.execute("DELETE FROM fill_template_lines WHERE envelope_id = ?", (row["id"],))
             conn.execute("DELETE FROM envelopes WHERE id = ?", (row["id"],))
             cur = conn.execute(
                 "UPDATE transactions SET envelope = ?, updated_at = ? WHERE LOWER(TRIM(envelope)) = LOWER(?)",
@@ -417,7 +469,7 @@ class App:
                 conn.execute("UPDATE rules SET active = 0 WHERE LOWER(set_envelope) = LOWER(?)", (name,))
             conn.commit()
             result = {"success": True, "envelope": name, "reassigned_count": cur.rowcount,
-                      "reassigned_to": reassign_to, "envelopes": _envelope_names(conn)}
+                      "reassigned_to": reassign_to, "envelopes": _envelope_names(conn), "kinds": _envelope_kinds(conn)}
         finally:
             conn.close()
         self.sync_csv()
@@ -448,11 +500,10 @@ class App:
         if kind and kind not in rules.KINDS:
             raise HttpError(400, f"Unknown kind '{kind}'")
         if mode == "regex":
-            import re
             try:
-                re.compile(phrase)
-            except re.error as exc:
-                raise HttpError(400, f"Invalid regular expression: {exc}")
+                rules.check_rename_rule(phrase, (data.get("set_payee") or "").strip())
+            except ValueError as exc:
+                raise HttpError(400, str(exc))
         fields = {
             "phrase": phrase, "match_mode": mode, "stage": stage, "set_kind": kind,
             "set_envelope": (data.get("set_envelope") or "").strip() or None,
@@ -460,6 +511,7 @@ class App:
             "set_income_label": (data.get("set_income_label") or "").strip() or None,
             "set_needs_review": 1 if data.get("set_needs_review") else 0,
             "exclusion_reason": (data.get("exclusion_reason") or "").strip() or None,
+            "description": (data.get("description") or "").strip()[:120] or None,
         }
         conn = self.conn()
         try:
@@ -469,7 +521,7 @@ class App:
                     """UPDATE rules SET phrase=:phrase, match_mode=:match_mode, stage=:stage, set_kind=:set_kind,
                               set_envelope=:set_envelope, set_payee=:set_payee, set_income_label=:set_income_label,
                               set_needs_review=:set_needs_review, exclusion_reason=:exclusion_reason,
-                              active=:active WHERE id=:id""",
+                              description=:description, active=:active WHERE id=:id""",
                     dict(fields, id=int(rule_id), active=0 if data.get("active") in (0, False) else 1),
                 )
                 if cur.rowcount == 0:
@@ -480,6 +532,58 @@ class App:
             return {"success": True, "id": rule_id}
         finally:
             conn.close()
+
+    def _rename_rule_from(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        rule = {"phrase": str(data.get("phrase") or "").strip(), "match_mode": data.get("match_mode") or "contains",
+                "set_payee": str(data.get("set_payee") or "").strip()}
+        if not rule["phrase"] or not rule["set_payee"]:
+            raise HttpError(400, "Enter the text to look for and the new name")
+        if rule["match_mode"] == "regex":
+            try:
+                rules.check_rename_rule(rule["phrase"], rule["set_payee"])
+            except ValueError as exc:
+                raise HttpError(400, str(exc))
+        return rule
+
+    def _renames(self, conn: Any, rule: Dict[str, Any]) -> List[Dict[str, Any]]:
+        out = []
+        for r in conn.execute("SELECT txn_id, name, raw_name, user_modified FROM transactions"):
+            hay = " ".join((r["raw_name"] or "").upper().split())
+            new = rules.rename_for(rule, hay, r["name"] or "")
+            if new is not None and new != r["name"]:
+                out.append({"txn_id": r["txn_id"], "before": r["name"], "after": new, "locked": bool(r["user_modified"])})
+        return out
+
+    def rule_preview(self, req: Request) -> Any:
+        """What a rename rule would do to the transactions already saved."""
+        rule = self._rename_rule_from(req.json())
+
+        def work(c):
+            changes = self._renames(c, rule)
+            open_ = [x for x in changes if not x["locked"]]
+            seen, examples = set(), []
+            for x in open_:
+                if (x["before"], x["after"]) not in seen and len(examples) < 8:
+                    seen.add((x["before"], x["after"]))
+                    examples.append({"before": x["before"], "after": x["after"]})
+            return {"count": len(open_), "locked": len(changes) - len(open_), "examples": examples}
+        return self._run(work)
+
+    def rule_apply_rename(self, req: Request) -> Any:
+        """Rename saved transactions with this rule, skipping ones you edited by hand."""
+        rule = self._rename_rule_from(req.json())
+
+        def work(c):
+            now = datetime.now().isoformat()
+            n = 0
+            for x in self._renames(c, rule):
+                if not x["locked"]:
+                    c.execute("UPDATE transactions SET name = ?, updated_at = ? WHERE txn_id = ?", (x["after"], now, x["txn_id"]))
+                    n += 1
+            return {"success": True, "renamed": n}
+        out = self._run(work)
+        self.sync_csv()
+        return out
 
     def delete_rule(self, req: Request) -> Any:
         rule_id = req.json().get("id")
@@ -559,8 +663,9 @@ class App:
             resolved.append({
                 "filepath": path, "filename": os.path.basename(path), "mapping": mapping,
                 "account_type": fc.get("account_type") or "Bank / Checking",
-                "is_mapped": bool(mapping.get("date_col") and mapping.get("name_col")
-                                  and (mapping.get("amount_col") or mapping.get("is_dual"))),
+                "is_mapped": import_engine.is_pdf(path) or bool(
+                    mapping.get("date_col") and mapping.get("name_col")
+                    and (mapping.get("amount_col") or mapping.get("is_dual"))),
                 "headers": fc.get("headers") or [],
             })
         return resolved
@@ -597,6 +702,13 @@ class App:
             conn.close()
         self.sync_csv()
         result["success"] = True
+        # Run the checks you chose for every import on just the rows that were saved
+        conn = self.conn()
+        try:
+            result["audit"] = audit.run_for_import(conn, result.get("inserted_ids") or [])
+            result["audit_auto_open"] = audit.get_config(conn)["auto_open"]
+        finally:
+            conn.close()
         return result
 
     def import_history(self, req: Request) -> Any:
@@ -609,6 +721,414 @@ class App:
 
     def vendor_lookup(self, req: Request) -> Any:
         return import_engine.lookup_vendor_online(str(req.json().get("query", "")))
+
+    # ----------------------------------------------------------- people / income
+
+    def get_people(self, req: Request) -> Any:
+        conn = self.conn()
+        try:
+            return {"people": [dict(r) for r in conn.execute("SELECT * FROM people ORDER BY id")]}
+        finally:
+            conn.close()
+
+    def save_person(self, req: Request) -> Any:
+        data = req.json()
+        name = str(data.get("name", "")).strip()
+        if not name:
+            raise HttpError(400, "Name is required")
+        color = (str(data.get("color") or "").strip() or None)
+        active = 0 if data.get("active") in (0, False) else 1
+        conn = self.conn()
+        try:
+            clash = conn.execute("SELECT id FROM people WHERE LOWER(name) = LOWER(?)", (name,)).fetchone()
+            pid = data.get("id")
+            if clash and (not pid or clash["id"] != int(pid)):
+                raise HttpError(400, f"'{name}' already exists")
+            if pid:
+                if conn.execute("UPDATE people SET name=?, color=?, active=? WHERE id=?", (name, color, active, int(pid))).rowcount == 0:
+                    raise HttpError(404, "Person not found")
+            else:
+                pid = conn.execute("INSERT INTO people (name, color, active) VALUES (?, ?, ?)", (name, color, active)).lastrowid
+            conn.commit()
+            return {"success": True, "id": int(pid)}
+        finally:
+            conn.close()
+
+    def get_income_sources(self, req: Request) -> Any:
+        conn = self.conn()
+        try:
+            return {"sources": income.source_stats(conn), "planning": {
+                k: v for k, v in income.planning_income(conn).items() if k != "sources"}}
+        finally:
+            conn.close()
+
+    def income_source_preview(self, req: Request) -> Any:
+        """How many saved transactions a phrase would match, with a few examples."""
+        phrase = req.query.get("phrase", "").strip().upper()
+        if not phrase:
+            return {"count": 0, "total": 0.0, "examples": []}
+        conn = self.conn()
+        try:
+            rows = conn.execute(
+                "SELECT date, name, raw_name, amount FROM transactions WHERE amount > 0 AND is_included = 1 "
+                "ORDER BY date DESC").fetchall()
+            hits = [r for r in rows if phrase in " ".join((r["raw_name"] or "").upper().split()) or phrase in (r["name"] or "").upper()]
+            return {
+                "count": len(hits), "total": round(sum(float(r["amount"]) for r in hits), 2),
+                "examples": [{"date": r["date"], "name": r["name"], "amount": float(r["amount"])} for r in hits[:5]],
+            }
+        finally:
+            conn.close()
+
+    def save_income_source(self, req: Request) -> Any:
+        data = req.json()
+        name = str(data.get("name", "")).strip()
+        phrase = str(data.get("match_phrase", "")).strip()
+        if not name or not phrase:
+            raise HttpError(400, "Name and match text are required")
+        freq = data.get("cadence_freq") or "weekly"
+        if freq not in recurrence.FREQUENCIES:
+            raise HttpError(400, "Unknown pay frequency")
+        try:
+            interval = max(1, int(data.get("cadence_interval") or 1))
+            person_id = int(data["person_id"]) if data.get("person_id") else None
+            typical = round(float(data["typical_amount"]) * 100) if data.get("typical_amount") not in (None, "") else None
+            threshold = int(data["bonus_threshold_pct"]) if data.get("bonus_threshold_pct") not in (None, "") else None
+        except (TypeError, ValueError):
+            raise HttpError(400, "A number field is not a valid number")
+        anchor = str(data.get("cadence_anchor_date") or "").strip() or None
+        if anchor and recurrence.parse(anchor) is None:
+            raise HttpError(400, "Anchor date must be a real date (YYYY-MM-DD)")
+        active = 0 if data.get("active") in (0, False) else 1
+        conn = self.conn()
+        try:
+            if not person_id or conn.execute("SELECT 1 FROM people WHERE id = ?", (person_id,)).fetchone() is None:
+                raise HttpError(400, "Choose who this income belongs to")
+            args = (person_id, name, phrase, freq, interval, anchor, typical, threshold, active)
+            sid = data.get("id")
+            if sid:
+                if conn.execute(
+                    """UPDATE income_sources SET person_id=?, name=?, match_phrase=?, cadence_freq=?, cadence_interval=?,
+                              cadence_anchor_date=?, typical_amount_cents=?, bonus_threshold_pct=?, active=? WHERE id=?""",
+                    args + (int(sid),)).rowcount == 0:
+                    raise HttpError(404, "Income source not found")
+            else:
+                sid = conn.execute(
+                    """INSERT INTO income_sources (person_id, name, match_phrase, cadence_freq, cadence_interval,
+                              cadence_anchor_date, typical_amount_cents, bonus_threshold_pct, active)
+                       VALUES (?,?,?,?,?,?,?,?,?)""", args).lastrowid
+            conn.commit()
+            result: Dict[str, Any] = {"success": True, "id": int(sid), "retagged": 0}
+            if data.get("apply_to_existing"):
+                ids = [
+                    r["txn_id"] for r in conn.execute(
+                        "SELECT txn_id, raw_name, name FROM transactions WHERE amount > 0 AND user_modified = 0")
+                    if phrase.upper() in " ".join((r["raw_name"] or "").upper().split()) or phrase.upper() in (r["name"] or "").upper()
+                ]
+                if ids:
+                    res = reclassify.reclassify(conn, txn_ids=ids, apply=True)
+                    result["retagged"] = res["changed_count"]
+        finally:
+            conn.close()
+        if result["retagged"]:
+            self.sync_csv()
+        return result
+
+    def delete_income_source(self, req: Request) -> Any:
+        sid = req.json().get("id")
+        if not sid:
+            raise HttpError(400, "Missing id")
+        conn = self.conn()
+        try:
+            used = conn.execute("SELECT COUNT(*) FROM transactions WHERE income_source_id = ?", (int(sid),)).fetchone()[0]
+            if used:
+                conn.execute("UPDATE income_sources SET active = 0 WHERE id = ?", (int(sid),))
+            else:
+                conn.execute("DELETE FROM income_sources WHERE id = ?", (int(sid),))
+            conn.commit()
+            return {"success": True, "deactivated": bool(used)}
+        finally:
+            conn.close()
+
+    def income_summary(self, req: Request) -> Any:
+        today = datetime.now().date()
+        start = to_iso_date(req.query.get("from", "")) or f"{today.year}-01-01"
+        end = to_iso_date(req.query.get("to", "")) or today.isoformat()
+        if start > end:
+            raise HttpError(400, "Start date is after end date")
+        conn = self.conn()
+        try:
+            result = income.income_summary(conn, start, end)
+            result["budget_monthly"] = round(sum(e["effective_budget"] for e in env_mod.list_envelopes(conn) if e["active"]), 2)
+            result["go_live_date"] = store.get_setting(conn, "go_live_date") or None
+            return result
+        finally:
+            conn.close()
+
+    # --------------------------------------------------------- budget / bills
+
+    def _run(self, work):
+        """Run work(conn) and commit; validation problems become 400s."""
+        conn = self.conn()
+        try:
+            result = work(conn)
+            conn.commit()
+            return result
+        except env_mod.ValidationError as exc:
+            conn.rollback()
+            raise HttpError(400, str(exc))
+        finally:
+            conn.close()
+
+    def budget_envelopes(self, req: Request) -> Any:
+        def work(c):
+            data = budget.suggestions(c)
+            data["envelopes"] = env_mod.list_envelopes(c)
+            data["unallocated_id"] = env_mod.system_envelope_id(c)
+            return data
+        return self._run(work)
+
+    def save_envelope_settings(self, req: Request) -> Any:
+        return self._run(lambda c: (env_mod.save_envelope(c, req.json()), {"success": True})[1])
+
+    def get_bills(self, req: Request) -> Any:
+        env_id = int(req.query["envelope_id"]) if req.query.get("envelope_id") else None
+        return self._run(lambda c: {"bills": env_mod.list_bills(c, env_id)})
+
+    def save_bill(self, req: Request) -> Any:
+        return self._run(lambda c: {"success": True, "id": env_mod.save_bill(c, req.json())})
+
+    def delete_bill(self, req: Request) -> Any:
+        bill_id = req.json().get("id")
+        if not bill_id:
+            raise HttpError(400, "Missing id")
+        return self._run(lambda c: (env_mod.delete_bill(c, bill_id), {"success": True})[1])
+
+    def bill_preview(self, req: Request) -> Any:
+        try:
+            interval = max(1, int(req.query.get("interval") or 1))
+        except ValueError:
+            raise HttpError(400, "Interval must be a number")
+        freq = req.query.get("freq") or "monthly"
+        if freq not in recurrence.FREQUENCIES:
+            raise HttpError(400, "Unknown repeat schedule")
+        return {"dates": env_mod.next_due_dates(freq, interval, req.query.get("anchor"), datetime.now().date() - timedelta(days=1))}
+
+    def bill_history(self, req: Request) -> Any:
+        try:
+            env_id = int(req.query.get("envelope_id", ""))
+        except ValueError:
+            raise HttpError(400, "Provide envelope_id")
+        return self._run(lambda c: {"payees": env_mod.bill_history(c, env_id)})
+
+    def accept_budget(self, req: Request) -> Any:
+        items = req.json().get("items") or []
+        return self._run(lambda c: {"success": True, "updated": budget.accept_suggestions(c, items)})
+
+    def get_templates(self, req: Request) -> Any:
+        return self._run(lambda c: {"templates": budget.get_templates(c)})
+
+    def save_template(self, req: Request) -> Any:
+        data = req.json()
+        return self._run(lambda c: (budget.save_template(c, int(data.get("income_source_id") or 0), data.get("lines") or []), {"success": True})[1])
+
+    def generate_template(self, req: Request) -> Any:
+        sid = int(req.json().get("income_source_id") or 0)
+        return self._run(lambda c: budget.generate_template(c, sid))
+
+    def get_settings(self, req: Request) -> Any:
+        def work(c):
+            out = {k: store.get_setting(c, k) for k in EDITABLE_SETTINGS}
+            out["go_live_date"] = store.get_setting(c, "go_live_date") or None
+            return out
+        return self._run(work)
+
+    def save_settings(self, req: Request) -> Any:
+        data = req.json()
+
+        def work(c):
+            for k in EDITABLE_SETTINGS:
+                if k in data:
+                    try:
+                        v = int(data[k])
+                    except (TypeError, ValueError):
+                        raise env_mod.ValidationError(f"{k} must be a whole number")
+                    if v < 1:
+                        raise env_mod.ValidationError(f"{k} must be at least 1")
+                    store.set_setting(c, k, str(v))
+            return {"success": True}
+        return self._run(work)
+
+    def setup_status(self, req: Request) -> Any:
+        return self._run(env_mod.setup_status)
+
+    def setup_go_live(self, req: Request) -> Any:
+        data = req.json()
+        if data.get("reset"):
+            store.backup_db(self.db_path)  # re-running setup rewrites envelope history, so keep a copy first
+        return self._run(lambda c: dict(
+            env_mod.go_live(c, str(data.get("date") or ""), data.get("opening") or {}, bool(data.get("reset"))), success=True))
+
+    # ------------------------------------------------- balances and fills
+
+    def _today(self, req: Request) -> Any:
+        d = recurrence.parse(req.query.get("as_of", "")) if req.query.get("as_of") else None
+        return d or datetime.now().date()
+
+    def _ledger_run(self, work):
+        """Like _run, but ledger conflicts become 409s."""
+        try:
+            return self._run(work)
+        except ledger.Conflict as exc:
+            raise HttpError(409, str(exc), **exc.extra)
+
+    def envelope_balances(self, req: Request) -> Any:
+        today = self._today(req)
+
+        def work(c):
+            data = ledger.envelope_states(c, today)
+            if data["enabled"]:
+                data["queue_count"] = len(ledger.fill_queue(c))
+                data["bills_due_soon"] = len([b for b in ledger.upcoming_bills(c, today, 7)])
+                data["invariant"] = ledger.check_invariant(c, today)
+            return data
+        return self._ledger_run(work)
+
+    def envelope_ledger(self, req: Request) -> Any:
+        try:
+            env_id = int(req.query.get("envelope_id", ""))
+        except ValueError:
+            raise HttpError(400, "Provide envelope_id")
+        return self._ledger_run(lambda c: ledger.ledger(c, env_id, req.query.get("from"), req.query.get("to")))
+
+    def ledger_csv(self, req: Request) -> Any:
+        try:
+            env_id = int(req.query.get("envelope_id", ""))
+        except ValueError:
+            raise HttpError(400, "Provide envelope_id")
+        out = self._ledger_run(lambda c: ledger.ledger_csv(c, env_id, req.query.get("from"), req.query.get("to")))
+        return Response(("\ufeff" + out["text"]).encode("utf-8"), "text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{out["filename"]}"'})
+
+    def discover_bills(self, req: Request) -> Any:
+        return self._run(lambda c: {"candidates": env_mod.discover_bills(c)})
+
+    def dismiss_bill_candidate(self, req: Request) -> Any:
+        key = str(req.json().get("key") or "")
+        return self._run(lambda c: (env_mod.dismiss_candidate(c, key), {"success": True})[1])
+
+    def audit_config(self, req: Request) -> Any:
+        def work(c):
+            cfg = audit.get_config(c)
+            cfg["pending"] = audit.pending_from_last_import(c)["total"]
+            return cfg
+        return self._run(work)
+
+    def audit_save_settings(self, req: Request) -> Any:
+        data = req.json()
+
+        def work(c):
+            try:
+                audit.save_config(c, data)
+            except (TypeError, ValueError) as exc:
+                raise env_mod.ValidationError(str(exc))
+            return {"success": True}
+        return self._run(work)
+
+    def audit_run(self, req: Request) -> Any:
+        d = req.json()
+
+        def work(c):
+            try:
+                return audit.run(c, d.get("checks") or [], lookback_days=int(d["lookback_days"]) if d.get("lookback_days") else None,
+                                 large_amount=float(d["large_amount"]) if d.get("large_amount") else None,
+                                 include_reviewed=bool(d.get("include_reviewed")))
+            except (TypeError, ValueError) as exc:
+                raise env_mod.ValidationError(str(exc))
+        return self._run(work)
+
+    def audit_dismiss(self, req: Request) -> Any:
+        items = req.json().get("items") or []
+        return self._run(lambda c: {"success": True, "dismissed": audit.dismiss(c, items)})
+
+    def audit_pending(self, req: Request) -> Any:
+        return self._run(audit.pending_from_last_import)
+
+    def upcoming_bills(self, req: Request) -> Any:
+        days = int(req.query.get("days") or 30)
+        return self._ledger_run(lambda c: {"bills": ledger.upcoming_bills(c, self._today(req), days)})
+
+    def link_bill(self, req: Request) -> Any:
+        data = req.json()
+
+        def work(c):
+            try:
+                billmatch.link(c, int(data.get("bill_id") or 0), str(data.get("txn_id") or ""))
+            except ValueError as exc:
+                raise env_mod.ValidationError(str(exc))
+            return {"success": True}
+        return self._ledger_run(work)
+
+    def unlink_bill(self, req: Request) -> Any:
+        txn_id = str(req.json().get("txn_id") or "")
+
+        def work(c):
+            try:
+                billmatch.unlink(c, txn_id)
+            except ValueError as exc:
+                raise env_mod.ValidationError(str(exc))
+            return {"success": True}
+        return self._ledger_run(work)
+
+    def allocation_queue(self, req: Request) -> Any:
+        return self._ledger_run(lambda c: {"queue": ledger.fill_queue(c), "go_live_date": store.get_setting(c, "go_live_date") or None})
+
+    def allocation_draft(self, req: Request) -> Any:
+        txn_id = req.query.get("txn_id", "")
+        return self._ledger_run(lambda c: ledger.draft_allocation(c, txn_id, self._today(req)))
+
+    def allocation_suggest(self, req: Request) -> Any:
+        amount = req.json().get("amount", 0)
+        return self._ledger_run(lambda c: {"lines": ledger.suggest_allocation(c, amount, self._today(req))})
+
+    def allocation_confirm(self, req: Request) -> Any:
+        data = req.json()
+        today = self._today(req)
+
+        def work(c):
+            tmpl = None
+            if data.get("income_txn_id"):
+                row = c.execute(
+                    "SELECT t.id FROM fill_templates t JOIN transactions x ON x.income_source_id = t.income_source_id WHERE x.txn_id = ?",
+                    (data["income_txn_id"],)).fetchone()
+                tmpl = row["id"] if row else None
+            alloc_id = ledger.confirm_allocation(
+                c, data.get("income_txn_id") or None, data.get("lines") or [], today, data.get("date"),
+                int(data["replace_allocation_id"]) if data.get("replace_allocation_id") else None, tmpl)
+            return {"success": True, "allocation_id": alloc_id}
+        out = self._ledger_run(work)
+        return out
+
+    def allocation_void(self, req: Request) -> Any:
+        aid = req.json().get("allocation_id")
+
+        def work(c):
+            ledger.void_allocation(c, int(aid or 0))
+            return {"success": True}
+        return self._ledger_run(work)
+
+    def move_transfer(self, req: Request) -> Any:
+        d = req.json()
+
+        def work(c):
+            mid = ledger.transfer(c, int(d.get("from_envelope_id") or 0), int(d.get("to_envelope_id") or 0),
+                                  d.get("amount"), d.get("date"), d.get("note") or "", self._today(req))
+            return {"success": True, "id": mid}
+        return self._ledger_run(work)
+
+    def move_void(self, req: Request) -> Any:
+        mid = req.json().get("id")
+        return self._ledger_run(lambda c: (ledger.void_move(c, int(mid or 0)), {"success": True})[1])
 
     # ----------------------------------------------------------------- router
 
@@ -630,9 +1150,53 @@ class App:
         r.add("POST", "/api/envelopes/add", self.add_envelope)
         r.add("POST", "/api/envelopes/rename", self.rename_envelope)
         r.add("POST", "/api/envelopes/delete", self.delete_envelope)
+        r.add("GET", "/api/budget/envelopes", self.budget_envelopes)
+        r.add("POST", "/api/budget/accept", self.accept_budget)
+        r.add("POST", "/api/envelopes/save", self.save_envelope_settings)
+        r.add("GET", "/api/bills", self.get_bills)
+        r.add("POST", "/api/bills/save", self.save_bill)
+        r.add("POST", "/api/bills/delete", self.delete_bill)
+        r.add("GET", "/api/bills/preview", self.bill_preview)
+        r.add("GET", "/api/bills/history", self.bill_history)
+        r.add("GET", "/api/templates", self.get_templates)
+        r.add("POST", "/api/templates/save", self.save_template)
+        r.add("POST", "/api/templates/generate", self.generate_template)
+        r.add("GET", "/api/settings", self.get_settings)
+        r.add("POST", "/api/settings", self.save_settings)
+        r.add("GET", "/api/setup/status", self.setup_status)
+        r.add("POST", "/api/setup/go-live", self.setup_go_live)
+        r.add("GET", "/api/envelopes/balances", self.envelope_balances)
+        r.add("GET", "/api/envelopes/ledger", self.envelope_ledger)
+        r.add("GET", "/api/envelopes/ledger.csv", self.ledger_csv)
+        r.add("GET", "/api/bills/discover", self.discover_bills)
+        r.add("POST", "/api/bills/dismiss", self.dismiss_bill_candidate)
+        r.add("GET", "/api/bills/upcoming", self.upcoming_bills)
+        r.add("POST", "/api/bills/link", self.link_bill)
+        r.add("POST", "/api/bills/unlink", self.unlink_bill)
+        r.add("GET", "/api/allocations/queue", self.allocation_queue)
+        r.add("GET", "/api/allocations/draft", self.allocation_draft)
+        r.add("POST", "/api/allocations/suggest", self.allocation_suggest)
+        r.add("POST", "/api/allocations/confirm", self.allocation_confirm)
+        r.add("POST", "/api/allocations/void", self.allocation_void)
+        r.add("POST", "/api/moves/transfer", self.move_transfer)
+        r.add("POST", "/api/moves/void", self.move_void)
+        r.add("GET", "/api/audit/config", self.audit_config)
+        r.add("POST", "/api/audit/settings", self.audit_save_settings)
+        r.add("POST", "/api/audit/run", self.audit_run)
+        r.add("POST", "/api/audit/dismiss", self.audit_dismiss)
+        r.add("GET", "/api/audit/pending", self.audit_pending)
+        r.add("GET", "/api/people", self.get_people)
+        r.add("POST", "/api/people/save", self.save_person)
+        r.add("GET", "/api/income/sources", self.get_income_sources)
+        r.add("GET", "/api/income/sources/preview", self.income_source_preview)
+        r.add("POST", "/api/income/sources/save", self.save_income_source)
+        r.add("POST", "/api/income/sources/delete", self.delete_income_source)
+        r.add("GET", "/api/income/summary", self.income_summary)
         r.add("GET", "/api/rules", self.get_rules)
         r.add("POST", "/api/rules/save", self.save_rule)
         r.add("POST", "/api/rules/delete", self.delete_rule)
+        r.add("POST", "/api/rules/preview", self.rule_preview)
+        r.add("POST", "/api/rules/apply-rename", self.rule_apply_rename)
         r.add("GET", "/api/import/scan", self.import_scan)
         r.add("POST", "/api/import/upload", self.import_upload)
         r.add("POST", "/api/import/inspect", self.import_inspect)
@@ -660,11 +1224,11 @@ def save_user_rule(conn: Any, fields: Dict[str, Any]) -> int:
     if existing:
         conn.execute(
             """UPDATE rules SET match_mode=?, set_kind=?, set_envelope=?, set_payee=?, set_income_label=?,
-                      set_needs_review=?, exclusion_reason=?, active=1 WHERE id=?""",
+                      set_needs_review=?, exclusion_reason=?, description=COALESCE(?, description), active=1 WHERE id=?""",
             (
                 fields.get("match_mode", "contains"), fields.get("set_kind"), fields.get("set_envelope"),
                 fields.get("set_payee"), fields.get("set_income_label"), int(fields.get("set_needs_review") or 0),
-                fields.get("exclusion_reason"), existing["id"],
+                fields.get("exclusion_reason"), fields.get("description"), existing["id"],
             ),
         )
         return int(existing["id"])

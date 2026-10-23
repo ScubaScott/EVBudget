@@ -41,6 +41,7 @@ function updateChartThemeStyles() {
 
 // Master state holders
 let allTransactions = [];
+let goLiveDate = null;
 let filteredTransactions = [];
 let configuredEnvelopesList = [];
 let activePreset = "last_30_days";
@@ -168,18 +169,33 @@ function setupTableRowClickListener() {
     });
 }
 
+// A paycheck that was split across envelopes can't be deleted or excluded until the fill is undone.
+async function postTxnWithVoidPrompt(url, payload) {
+    const send = async (body) => {
+        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        return res.json();
+    };
+    let result = await send(payload);
+    if (result && result.needs_void && confirm(result.error + '\n\nUndo that fill and continue?')) {
+        result = await send(Object.assign({}, payload, { void_allocation: true }));
+    }
+    return result;
+}
+
 // Reloads transactions from the server but keeps the current filters, so edits don't reset the view
 async function refreshTransactions() {
     try {
         const res = await fetch('/api/transactions');
         const data = await res.json();
         allTransactions = data.transactions || [];
+        goLiveDate = data.go_live_date || null;
         configuredEnvelopesList = data.envelopes || configuredEnvelopesList;
         peopleList = data.people || peopleList;
         incomeSourcesList = data.income_sources || incomeSourcesList;
         populateEnvelopeDropdowns();
         populatePeopleDropdowns();
         onFilterChange();
+        document.dispatchEvent(new CustomEvent('txnsrefreshed'));
     } catch (err) {
         console.error("Failed to refresh transactions:", err);
         showToast("Could not refresh data from the server", true);
@@ -192,12 +208,14 @@ async function reloadTransactionData() {
         const res = await fetch('/api/transactions');
         const data = await res.json();
         allTransactions = data.transactions || [];
+        goLiveDate = data.go_live_date || null;
         configuredEnvelopesList = data.envelopes || [];
         peopleList = data.people || [];
         incomeSourcesList = data.income_sources || [];
         populateEnvelopeDropdowns();
         populatePeopleDropdowns();
         applyPreset('last_30_days');
+        document.dispatchEvent(new CustomEvent('txnsrefreshed'));
     } catch (err) {
         console.error("Failed to load transactions:", err);
         showToast("Failed to connect to backend", true);
@@ -261,6 +279,23 @@ function populatePeopleDropdowns() {
 
     document.getElementById('editPerson').innerHTML = '<option value="">(Not set)</option>' + options;
     document.getElementById('bulkPersonSelect').innerHTML = '<option value="">(Person not set)</option>' + options;
+}
+
+// Jumps to spending and refunds since go-live that have no envelope
+function goToUncategorized() {
+    showTab('analytics');
+    setInclusionFilter('included');
+    document.getElementById('filterSearch').value = '';
+    document.getElementById('filterPerson').value = '';
+    document.getElementById('filterKind').value = '';
+    applyPreset('all_time');
+    document.getElementById('filterEnvelope').value = '__UNALLOCATED__';
+    if (goLiveDate) {
+        document.getElementById('filterStartDate').value = goLiveDate;
+        onCustomDateChange();
+    } else {
+        onFilterChange();
+    }
 }
 
 // Jumps to the transactions that still need a decision (unmatched Venmo, unknown deposits, ...)
@@ -1257,6 +1292,37 @@ function appendNextTableChunk() {
     }
 }
 
+// Does this deposit count toward envelope fills (income, included, on or after go-live)?
+function isFillable(txn) {
+    return !!goLiveDate && INCOME_KINDS.includes(txn.txn_kind) && txn.is_included === 1 && txn.date >= goLiveDate;
+}
+
+// A clickable badge that opens the deposit's fill: view or edit it if funded, create it if not
+function fillBadgeMarkup(txn) {
+    if (!isFillable(txn)) return '';
+    const id = escapeHtml(txn.txn_id);
+    return txn.funded
+        ? `<button type="button" class="kind-badge kind-refund kind-link" title="View or edit how this deposit was split across envelopes" onclick="event.stopPropagation(); openAllocModal('${id}')">Funded &rsaquo;</button>`
+        : `<button type="button" class="kind-badge kind-review kind-link" title="Split this deposit across envelopes" onclick="event.stopPropagation(); openAllocModal('${id}')">To fill &rsaquo;</button>`;
+}
+
+// Shows the fill link inside the transaction editor
+function refreshEditFill(txn) {
+    const wrap = document.getElementById('editFillWrap');
+    const show = isFillable(txn);
+    wrap.style.display = show ? '' : 'none';
+    if (!show) return;
+    document.getElementById('editFillInfo').textContent = txn.funded
+        ? 'This deposit has been split across envelopes.' : 'This deposit has not been split across envelopes yet.';
+    document.getElementById('editFillBtn').textContent = txn.funded ? 'View or edit fill\u2026' : 'Fill envelopes\u2026';
+}
+
+function openFillFromEditModal() {
+    const id = activeEditingTxnId;
+    closeEditModal();
+    if (id) openAllocModal(id);
+}
+
 // Small labels under the envelope: who got paid, what kind of money this is, and whether it needs a look
 function kindBadgeMarkup(txn) {
     const bits = [];
@@ -1270,6 +1336,8 @@ function kindBadgeMarkup(txn) {
     } else if (EXCLUDED_KINDS.includes(txn.txn_kind)) {
         bits.push(`<span class="kind-badge kind-muted">${escapeHtml(KIND_LABELS[txn.txn_kind])}</span>`);
     }
+    const fill = fillBadgeMarkup(txn);
+    if (fill) bits.push(fill);
     if (txn.needs_review) {
         bits.push(`<span class="kind-badge kind-review" title="Needs a decision">Review</span>`);
     }
@@ -1332,6 +1400,7 @@ function openEditModal(txnId) {
     document.getElementById('editNeedsReview').checked = !!txn.needs_review;
     editReimbursesTxnId = txn.reimburses_txn_id || '';
     refreshEditKindFields();
+    refreshEditFill(txn);
 
     const d = parseTxnDate(txn.date);
     document.getElementById('editDate').value = toInputDateFormat(d);
@@ -1394,9 +1463,11 @@ function clearEditReimbursement() {
 
 function closeEditModal() {
     const modal = document.getElementById('editModalOverlay');
+    const wasOpen = modal.classList.contains('active');
     modal.classList.remove('active');
     document.body.style.overflow = '';
     activeEditingTxnId = null;
+    if (wasOpen) document.dispatchEvent(new CustomEvent('editclosed'));
 }
 
 function handleModalOverlayClick(event) {
@@ -1454,13 +1525,7 @@ async function saveTransactionEdits(event) {
     };
 
     try {
-        const response = await fetch('/api/transactions/update', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(updatePayload)
-        });
-
-        const result = await response.json();
+        const result = await postTxnWithVoidPrompt('/api/transactions/update', updatePayload);
         if (result.success) {
             const idx = allTransactions.findIndex(t => t.txn_id === activeEditingTxnId);
             if (idx !== -1) {
@@ -1553,10 +1618,12 @@ function openAuditModal() {
 
 function closeAuditModal() {
     const modal = document.getElementById('auditModalOverlay');
+    const wasOpen = modal.classList.contains('active');
     modal.classList.remove('active');
     document.body.style.overflow = '';
     auditCandidatesQueue = [];
     currentAuditIndex = 0;
+    if (wasOpen) document.dispatchEvent(new CustomEvent('comparedclosed'));
 }
 
 function handleAuditOverlayClick(event) {
@@ -1778,12 +1845,7 @@ function prevAuditCandidate() {
 // Resolves duplicate pair by permanently deleting the discarded transaction
 async function resolveDuplicatePair(keepTxnId, deleteTxnId) {
     try {
-        const res = await fetch('/api/transactions/delete', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ txn_id: deleteTxnId })
-        });
-        const result = await res.json();
+        const result = await postTxnWithVoidPrompt('/api/transactions/delete', { txn_id: deleteTxnId });
 
         if (result.success) {
             allTransactions = allTransactions.filter(t => t.txn_id !== deleteTxnId);
@@ -1814,12 +1876,7 @@ async function resolveDuplicatePair(keepTxnId, deleteTxnId) {
 // Deletes single uncategorized item during audit
 async function deleteSingleAuditTransaction(txnId) {
     try {
-        const res = await fetch('/api/transactions/delete', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ txn_id: txnId })
-        });
-        const result = await res.json();
+        const result = await postTxnWithVoidPrompt('/api/transactions/delete', { txn_id: txnId });
 
         if (result.success) {
             allTransactions = allTransactions.filter(t => t.txn_id !== txnId);
@@ -2204,11 +2261,31 @@ async function submitBulkModalForm() {
 // =====================================================================
 
 let editingEnvelopeName = null;
+let envelopeKinds = {};   // name -> { id, kind }, from the server
 let deleteTargetEnvelope = null;
 let deleteTargetTxnCount = 0;
 
+async function loadEnvelopeKinds() {
+    try { envelopeKinds = (await api('/api/envelopes')).kinds || {}; } catch (err) { /* the list still works without it */ }
+    renderEnvelopeManagerList();
+}
+
+async function setEnvelopeKind(name, kind) {
+    const info = envelopeKinds[name];
+    if (!info) return;
+    try {
+        await apiPost('/api/envelopes/save', { id: info.id, kind });
+        info.kind = kind;
+        showToast(`"${name}" is now a ${{ spending: 'spending', bill: 'bills', savings: 'savings' }[kind]} envelope.`);
+    } catch (err) {
+        showToast(err.message, true);
+        renderEnvelopeManagerList();
+    }
+}
+
 function openEnvelopeManagerModal() {
     editingEnvelopeName = null;
+    loadEnvelopeKinds();
     document.getElementById('newEnvelopeInput').value = '';
     document.getElementById('envSearchFilter').value = '';
     renderEnvelopeManagerList();
@@ -2223,6 +2300,7 @@ function closeEnvelopeManagerModal() {
     const modal = document.getElementById('envelopeModalOverlay');
     modal.classList.remove('active');
     document.body.style.overflow = '';
+    document.dispatchEvent(new CustomEvent('txnsrefreshed'));  // other tabs reload their envelope lists
 }
 
 function handleEnvelopeModalOverlayClick(event) {
@@ -2262,7 +2340,7 @@ function renderEnvelopeManagerList() {
     if (envList.length === 0) {
         container.innerHTML = `
             <tr>
-                <td colspan="3" style="text-align: center; padding: 30px; color: var(--text-muted);">
+                <td colspan="4" style="text-align: center; padding: 30px; color: var(--text-muted);">
                     ${searchVal ? 'No envelopes match your search.' : 'No envelopes configured. Add one above!'}
                 </td>
             </tr>
@@ -2277,7 +2355,7 @@ function renderEnvelopeManagerList() {
         if (isEditing) {
             return `
                 <tr class="envelope-row">
-                    <td colspan="2">
+                    <td colspan="3">
                         <div class="env-inline-edit">
                             <input type="text" id="inlineRenameInput" class="env-inline-input" value="${escapeHtml(env)}" onkeydown="if(event.key==='Enter') submitInlineRename('${escapeHtml(env)}'); if(event.key==='Escape') cancelInlineRename();">
                             <button class="btn-inline-action btn-inline-save" onclick="submitInlineRename('${escapeHtml(env)}')">Save</button>
@@ -2295,6 +2373,12 @@ function renderEnvelopeManagerList() {
             <tr class="envelope-row">
                 <td class="env-name-cell">
                     <span>${escapeHtml(env)}</span>
+                </td>
+                <td>
+                    <select class="select-input env-kind-select" onchange="setEnvelopeKind(this.dataset.env, this.value)" data-env="${escapeHtml(env)}" ${envelopeKinds[env] ? '' : 'disabled'} aria-label="Type of ${escapeHtml(env)}">
+                        ${[['spending', 'Spending'], ['bill', 'Bills'], ['savings', 'Savings']].map(([v, l]) =>
+                            `<option value="${v}" ${(envelopeKinds[env] || {}).kind === v ? 'selected' : ''}>${l}</option>`).join('')}
+                    </select>
                 </td>
                 <td>
                     <span class="env-count-badge ${txnCount > 0 ? 'has-txns' : 'zero-txns'}">
@@ -2354,11 +2438,12 @@ async function submitAddEnvelope() {
         const res = await fetch('/api/envelopes/add', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ envelope: cleanName })
+            body: JSON.stringify({ envelope: cleanName, kind: document.getElementById('newEnvelopeKind').value })
         });
         const result = await res.json();
         if (result.success) {
             configuredEnvelopesList = result.envelopes || [...configuredEnvelopesList, cleanName];
+            envelopeKinds = result.kinds || envelopeKinds;
             input.value = '';
             populateEnvelopeDropdowns();
             renderEnvelopeManagerList();
@@ -2421,6 +2506,7 @@ async function submitInlineRename(oldName) {
         const result = await res.json();
         if (result.success) {
             configuredEnvelopesList = result.envelopes;
+            envelopeKinds = result.kinds || envelopeKinds;
             // Update all matching in-memory transactions
             allTransactions.forEach(t => {
                 if ((t.envelope || '').trim().toLowerCase() === oldName.trim().toLowerCase()) {
@@ -2529,6 +2615,7 @@ async function executeDeleteEnvelopeDirect(envName, reassignTo) {
         const result = await res.json();
         if (result.success) {
             configuredEnvelopesList = result.envelopes;
+            envelopeKinds = result.kinds || envelopeKinds;
 
             // Update in-memory transactions
             allTransactions.forEach(t => {

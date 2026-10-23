@@ -100,15 +100,24 @@ function renderImportFiles() {
         if (!f.valid) {
             return `<tr class="import-file-bad"><td></td><td>${escapeHtml(f.filename)}</td><td colspan="4">Can't read this file: ${escapeHtml(f.error || 'unknown problem')}</td></tr>`;
         }
-        const mapped = f.is_mapped
+        const isPdf = f.kind === 'pdf';
+        const mapped = isPdf
+            ? `<span class="status-pill ${f.reconciled ? 'status-included' : 'status-excluded'}">${escapeHtml(f.bank)} statement${f.reconciled ? '' : ': check totals'}</span>`
+            : f.is_mapped
             ? `<span class="status-pill status-included">${f.from_preset ? 'Remembered' : 'Detected'}</span>`
             : `<span class="status-pill status-excluded">Needs mapping</span>`;
+        const fileSub = isPdf
+            ? `${f.row_count} transactions${f.account_last4 ? ', card ending ' + escapeHtml(f.account_last4) : ''}`
+              + `${f.period_start ? ', ' + escapeHtml(formatDisplayDate(f.period_start)) + ' to ' + escapeHtml(formatDisplayDate(f.period_end)) : ''}`
+            : `${(f.size / 1024).toFixed(0)} KB`;
+        const warn = (f.warnings || []).map(w => `<div class="import-file-sub" style="color:var(--accent-red);">${escapeHtml(w)}</div>`).join('');
+        const editBtn = isPdf ? '' : `<button type="button" class="btn-inline-action btn-inline-cancel" onclick="openMappingModal(${i})">Edit</button>`;
         const imported = f.imported_rows
             ? `<span class="import-imported">${f.imported_rows.toLocaleString()} rows</span>`
             : '<span class="import-not-yet">Not yet</span>';
         return `<tr>
             <td style="text-align:center;"><input type="checkbox" class="txn-checkbox" ${f.selected ? 'checked' : ''} ${f.is_mapped ? '' : 'disabled'} onchange="importToggleFile(${i}, this.checked)"></td>
-            <td><div style="font-weight:500;">${escapeHtml(f.filename)}</div><div class="import-file-sub">${(f.size / 1024).toFixed(0)} KB</div></td>
+            <td><div style="font-weight:500;">${escapeHtml(f.filename)}</div><div class="import-file-sub">${fileSub}</div>${warn}</td>
             <td style="white-space:nowrap;">${escapeHtml(formatDisplayDate(f.modified))}</td>
             <td>${imported}</td>
             <td>
@@ -117,7 +126,7 @@ function renderImportFiles() {
                     <option value="Credit / Debit" ${f.account_type === 'Credit / Debit' ? 'selected' : ''}>Credit / Debit</option>
                 </select>
             </td>
-            <td>${mapped} <button type="button" class="btn-inline-action btn-inline-cancel" onclick="openMappingModal(${i})">Edit</button></td>
+            <td>${mapped} ${editBtn}</td>
         </tr>`;
     }).join('');
     updateImportSelectionHint();
@@ -541,6 +550,13 @@ async function importCommit() {
                 <button type="button" class="btn-modal-cancel" onclick="showTab(\'analytics\')">Open Analytics</button>
             </div>`;
         showToast(`Saved ${result.inserted} new transaction${result.inserted === 1 ? '' : 's'}.`);
+        const flagged = result.audit ? result.audit.total : 0;
+        if (flagged > 0) {
+            banner.innerHTML += `<div class="import-done-actions audit-alert"><strong>&#9888; ${flagged} thing${flagged === 1 ? '' : 's'} in this import worth a look.</strong>
+                <button type="button" class="btn-modal-save" onclick="openAuditDialog({ mode: 'import' })">Review</button></div>`;
+        }
+        loadAuditBadge();
+        if (flagged > 0 && result.audit_auto_open) openAuditDialog({ mode: 'import', results: result.audit });
         await importScanFolder();
         await refreshTransactions();
         // Re-run the preview so the grid now shows these as saved
@@ -557,7 +573,7 @@ async function importCommit() {
 // Rules dialog
 // ---------------------------------------------------------------------
 let importRulesData = [];
-let ruleOrigin = 'user';
+let ruleFilter = 'all';
 
 async function openImportRulesModal() {
     document.getElementById('rulesModalOverlay').classList.add('active');
@@ -568,6 +584,7 @@ async function openImportRulesModal() {
 }
 
 function closeImportRulesModal() {
+    if (editingRuleId !== null) cancelRuleEdit();
     document.getElementById('rulesModalOverlay').classList.remove('active');
     if (!document.querySelector('.modal-overlay.active')) document.body.style.overflow = '';
 }
@@ -581,11 +598,21 @@ async function loadImportRules() {
     }
 }
 
-function setRuleOrigin(origin) {
-    ruleOrigin = origin;
-    document.querySelectorAll('#ruleOriginToggle .segmented-btn').forEach(b => b.classList.toggle('active', b.dataset.origin === origin));
+function setRuleFilter(action) {
+    ruleFilter = action;
+    document.querySelectorAll('#ruleOriginToggle .segmented-btn').forEach(b => b.classList.toggle('active', b.dataset.action === action));
     renderImportRules();
 }
+
+// The filter groups a rule by what it does, whoever supplied it
+function ruleGroupOf(r) {
+    if (r.stage === 'envelope') return 'envelope';
+    if (r.stage === 'payee') return 'payee';
+    if (r.stage === 'exclude') return 'exclude';
+    if (r.stage === 'include_override') return 'include';
+    return 'income';
+}
+const RULE_ORIGIN_LABELS = { user: 'Mine', vendor: 'Vendor list', core: 'Built-in' };
 
 const STAGE_LABELS = {
     include_override: 'Keep (never exclude)', exclude: 'Exclude', income: 'Positive amounts',
@@ -599,7 +626,7 @@ function describeRule(r) {
     if (r.set_kind && ['income', 'refund'].includes(r.stage)) bits.push('Treat as ' + KIND_LABELS[r.set_kind].toLowerCase());
     if (r.set_envelope) bits.push('→ ' + r.set_envelope);
     if (r.set_income_label) bits.push(`label "${r.set_income_label}"`);
-    if (r.set_payee) bits.push(`rename to "${r.set_payee}"`);
+    if (r.set_payee) bits.push(r.match_mode === 'regex' ? `replace the match with "${r.set_payee}"` : `rename to "${r.set_payee}"`);
     if (r.set_needs_review) bits.push('flag for review');
     if (r.match_mode && r.match_mode !== 'contains') bits.push(`(${r.match_mode === 'regex' ? 'pattern' : r.match_mode === 'word' ? 'whole word' : 'vendor match'})`);
     return bits.join(' ') || '—';
@@ -608,48 +635,147 @@ function describeRule(r) {
 function renderImportRules() {
     const q = (document.getElementById('ruleSearch').value || '').trim().toLowerCase();
     const rows = importRulesData
-        .filter(r => ruleOrigin === 'all' || r.origin === ruleOrigin)
-        .filter(r => !q || (r.phrase + ' ' + describeRule(r)).toLowerCase().includes(q));
+        .filter(r => ruleFilter === 'all' || ruleGroupOf(r) === ruleFilter)
+        .filter(r => !q || (r.phrase + ' ' + (r.description || '') + ' ' + describeRule(r)).toLowerCase().includes(q));
     document.getElementById('rulesBody').innerHTML = rows.length === 0
         ? '<tr><td colspan="5" class="import-more">No rules here yet.</td></tr>'
         : rows.slice(0, 400).map(r => `<tr class="${r.active ? '' : 'excluded-row'}">
-            <td><code>${escapeHtml(r.phrase)}</code></td>
+            <td>${r.description ? `<div class="rule-desc">${escapeHtml(r.description)}</div>` : ''}<code>${escapeHtml(r.phrase)}</code> <span class="rule-origin">${RULE_ORIGIN_LABELS[r.origin] || ''}</span></td>
             <td>${escapeHtml(STAGE_LABELS[r.stage] || r.stage)}</td>
             <td>${escapeHtml(describeRule(r))}</td>
             <td style="text-align:center;"><input type="checkbox" class="txn-checkbox" ${r.active ? 'checked' : ''} onchange="toggleImportRule(${r.id}, this.checked)"></td>
-            <td><button type="button" class="btn-env-icon delete" title="Delete rule" onclick="deleteImportRule(${r.id})">&times;</button></td>
+            <td style="white-space:nowrap; text-align:right;">
+                <button type="button" class="btn-inline-action btn-inline-cancel" ${ruleActionOf(r) ? '' : 'disabled title="A special built-in rule. Turn it off or add your own."'} onclick="editImportRule(${r.id})">Edit</button>
+                <button type="button" class="btn-env-icon delete" title="Delete rule" onclick="deleteImportRule(${r.id})">&times;</button></td>
         </tr>`).join('') + (rows.length > 400 ? `<tr><td colspan="5" class="import-more">Showing 400 of ${rows.length}. Use search to narrow.</td></tr>` : '');
 }
 
 function onRuleActionChange() {
     const action = document.getElementById('ruleNewAction').value;
+    const regex = document.getElementById('ruleNewRegex').checked;
     document.getElementById('ruleNewEnvelope').style.display = ['envelope', 'refund'].includes(action) ? '' : 'none';
-    document.getElementById('ruleNewPayee').style.display = action === 'payee' ? '' : 'none';
+    const payee = document.getElementById('ruleNewPayee');
+    payee.style.display = action === 'payee' ? '' : 'none';
+    payee.placeholder = regex ? 'Replace with (e.g. \\1)' : 'New payee name';
+    document.getElementById('ruleNewPhrase').placeholder = regex ? 'Pattern (e.g. SQ\\s?\\*\\s?(.*))' : 'Text to look for (e.g. TARGET)';
+    document.getElementById('ruleRegexHint').hidden = !(regex && action === 'payee');
+    previewNewRule();
 }
 
+// Shows what a rename rule would do to saved transactions before it is added
+let rulePreviewTimer = null;
+function previewNewRule() {
+    clearTimeout(rulePreviewTimer);
+    const box = document.getElementById('ruleNewPreview');
+    const phrase = document.getElementById('ruleNewPhrase').value.trim();
+    const payee = document.getElementById('ruleNewPayee').value.trim();
+    if (document.getElementById('ruleNewAction').value !== 'payee' || !phrase || !payee) { box.innerHTML = ''; return; }
+    rulePreviewTimer = setTimeout(async () => {
+        try {
+            const r = await apiPost('/api/rules/preview', { phrase, set_payee: payee, match_mode: document.getElementById('ruleNewRegex').checked ? 'regex' : 'contains' });
+            box.innerHTML = r.count === 0
+                ? 'No saved transactions would change.' + (r.locked ? ` (${r.locked} you edited by hand are left alone.)` : '')
+                : `Would rename <strong>${r.count}</strong> saved transaction${r.count === 1 ? '' : 's'}: ` +
+                  r.examples.slice(0, 4).map(e => `<code>${escapeHtml(e.before)}</code> &rarr; <code>${escapeHtml(e.after)}</code>`).join(', ') + (r.examples.length > 4 ? ', ...' : '');
+        } catch (err) {
+            box.innerHTML = `<span class="tpl-short">${escapeHtml(err.message)}</span>`;
+        }
+    }, 300);
+}
+
+// Which action in the form a stored rule corresponds to (null = a special built-in rule the form can't show)
+function ruleActionOf(r) {
+    if (r.stage === 'envelope' && r.set_envelope) return 'envelope';
+    if (r.stage === 'refund' && r.set_kind === 'refund') return 'refund';
+    if (r.stage === 'income' && r.set_kind === 'other_income') return 'other_income';
+    if (r.stage === 'exclude' && ['transfer', 'cc_payment'].includes(r.set_kind)) return r.set_kind;
+    if (r.stage === 'payee') return 'payee';
+    if (r.stage === 'include_override') return 'include';
+    return null;
+}
+
+// Every column the action decides, so switching a rule to a different action clears what no longer applies
+function ruleFieldsFor(action, envelope, payee, orig) {
+    const base = { stage: 'envelope', set_kind: null, set_envelope: null, set_payee: orig ? orig.set_payee : null, exclusion_reason: null };
+    if (action === 'envelope') return Object.assign(base, { stage: 'envelope', set_envelope: envelope });
+    if (action === 'refund') return Object.assign(base, { stage: 'refund', set_kind: 'refund', set_envelope: envelope });
+    if (action === 'other_income') return Object.assign(base, { stage: 'income', set_kind: 'other_income' });
+    if (action === 'include') return Object.assign(base, { stage: 'include_override', set_kind: 'expense', set_envelope: envelope || null });
+    if (action === 'payee') return Object.assign(base, { stage: 'payee', set_payee: payee });
+    return Object.assign(base, { stage: 'exclude', set_kind: action, exclusion_reason: action === 'transfer' ? 'Internal Account Transfer' : 'Credit Card Payment / Autopay' });
+}
+
+let editingRuleId = null;
+
+function editImportRule(id) {
+    const r = importRulesData.find(x => x.id === id);
+    const action = r && ruleActionOf(r);
+    if (!action) { showToast('This built-in rule has options the form can\'t show. Turn it off, or add your own rule.', true); return; }
+    editingRuleId = id;
+    document.getElementById('ruleNewDescription').value = r.description || '';
+    document.getElementById('ruleNewPhrase').value = r.phrase;
+    document.getElementById('ruleNewAction').value = action;
+    document.getElementById('ruleNewRegex').checked = r.match_mode === 'regex';
+    document.getElementById('ruleNewEnvelope').value = r.set_envelope || '';
+    document.getElementById('ruleNewPayee').value = r.set_payee || '';
+    onRuleActionChange();
+    document.getElementById('btnRuleSave').textContent = 'Save changes';
+    document.getElementById('btnRuleCancel').hidden = false;
+    document.getElementById('ruleNewDescription').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    document.getElementById('ruleNewDescription').focus();
+}
+
+function cancelRuleEdit() {
+    editingRuleId = null;
+    ['ruleNewDescription', 'ruleNewPhrase', 'ruleNewPayee'].forEach(id => { document.getElementById(id).value = ''; });
+    document.getElementById('ruleNewRegex').checked = false;
+    document.getElementById('ruleNewPreview').innerHTML = '';
+    document.getElementById('btnRuleSave').textContent = 'Add rule';
+    document.getElementById('btnRuleCancel').hidden = true;
+    onRuleActionChange();
+}
+
+// Adds a new rule, or saves the one being edited
 async function addImportRule() {
     const phrase = document.getElementById('ruleNewPhrase').value.trim();
     const action = document.getElementById('ruleNewAction').value;
     const envelope = document.getElementById('ruleNewEnvelope').value;
     const payee = document.getElementById('ruleNewPayee').value.trim();
+    const orig = editingRuleId ? importRulesData.find(x => x.id === editingRuleId) : null;
     if (!phrase) { showToast('Enter the text to look for.', true); return; }
-    const body = { phrase };
-    if (action === 'envelope') Object.assign(body, { stage: 'envelope', set_envelope: envelope });
-    else if (action === 'refund') Object.assign(body, { stage: 'refund', set_kind: 'refund', set_envelope: envelope });
-    else if (action === 'other_income') Object.assign(body, { stage: 'income', set_kind: 'other_income' });
-    else if (action === 'payee') Object.assign(body, { stage: 'payee', set_payee: payee });
-    else Object.assign(body, { stage: 'exclude', set_kind: action, exclusion_reason: action === 'transfer' ? 'Internal Account Transfer' : 'Credit Card Payment / Autopay' });
-    if (['envelope'].includes(action) && !envelope) { showToast('Choose an envelope.', true); return; }
+    if (['envelope', 'refund'].includes(action) && !envelope) { showToast('Choose an envelope.', true); return; }
     if (action === 'payee' && !payee) { showToast('Enter the new payee name.', true); return; }
+
+    // Matching mode: pattern if ticked; otherwise keep a whole-word or vendor-style match the form can't show
+    const keepMode = orig && ['word', 'vendor'].includes(orig.match_mode) ? orig.match_mode : 'contains';
+    const body = Object.assign({ phrase, match_mode: document.getElementById('ruleNewRegex').checked ? 'regex' : keepMode,
+        description: document.getElementById('ruleNewDescription').value.trim() }, ruleFieldsFor(action, envelope, payee, orig));
+    if (orig) {
+        body.id = orig.id;
+        body.active = orig.active;
+        const flagged = ['refund', 'income'].includes(body.stage) && ['refund', 'income'].includes(orig.stage);
+        body.set_needs_review = flagged ? orig.set_needs_review : 0;
+        body.set_income_label = body.stage === 'income' ? orig.set_income_label : null;
+    }
     try {
         await apiPost('/api/rules/save', body);
-        document.getElementById('ruleNewPhrase').value = '';
-        document.getElementById('ruleNewPayee').value = '';
-        setRuleOrigin('user');
+        let renamedNote = '';
+        if (action === 'payee') {
+            const probe = { phrase, set_payee: payee, match_mode: body.match_mode };
+            const pv = await apiPost('/api/rules/preview', probe);
+            if (pv.count > 0 && confirm(`Also rename the ${pv.count} saved transaction${pv.count === 1 ? '' : 's'} this matches?\n\nFor example: ${pv.examples[0].before} -> ${pv.examples[0].after}`)) {
+                const done = await apiPost('/api/rules/apply-rename', probe);
+                renamedNote = ` ${done.renamed} saved transaction${done.renamed === 1 ? '' : 's'} renamed.`;
+                await refreshTransactions();
+            }
+        }
+        const wasEdit = !!orig;
+        cancelRuleEdit();
+        if (!wasEdit) setRuleFilter('all');
         await loadImportRules();
-        showToast(`Rule added for "${phrase}".`);
+        showToast(`Rule ${wasEdit ? 'updated' : 'added'} for "${phrase}".` + renamedNote);
     } catch (err) {
-        showToast('Could not add the rule: ' + err.message, true);
+        showToast('Could not save the rule: ' + err.message, true);
     }
 }
 

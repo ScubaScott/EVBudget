@@ -65,6 +65,59 @@ def rule_matches(rule: Dict[str, Any], texts: Sequence[str]) -> bool:
     return False
 
 
+_REF_BRACED = re.compile(r"\$\{(\d+)\}")
+_REF_DOLLAR = re.compile(r"\$(\d+)")
+_REF_ANY = re.compile(r"\\g<(\w+)>|\\(\d+)|\$\{(\d+)\}|\$(\d+)")
+
+
+def translate_replacement(repl: str) -> str:
+    """Let people write $1 or ${1} as well as \\1 for a captured group."""
+    return _REF_DOLLAR.sub(r"\\g<\1>", _REF_BRACED.sub(r"\\g<\1>", repl))
+
+
+def check_rename_rule(pattern: str, repl: str) -> None:
+    """Raise ValueError if the pattern isn't valid or the replacement names a group the pattern doesn't have."""
+    try:
+        compiled = re.compile(pattern, re.IGNORECASE)
+    except re.error as exc:
+        raise ValueError(f"Invalid pattern: {exc}")
+    for m in _REF_ANY.finditer(repl):
+        named, num = m.group(1), next((g for g in m.groups()[1:] if g), None)
+        if named is not None and not named.isdigit():
+            if named not in compiled.groupindex:
+                raise ValueError(f"The pattern has no group called '{named}'")
+        else:
+            n = int(named if named is not None else num)
+            if n > compiled.groups:
+                raise ValueError(f"The replacement uses group {n}, but the pattern only has {compiled.groups} group(s). Put (parentheses) around the part to keep.")
+
+
+def rename_for(rule: Dict[str, Any], hay_raw: str, name: str) -> Optional[str]:
+    """The new payee name if this rule renames `name`, otherwise None.
+
+    A pattern rule replaces just the part it matches (so use ^...$ or (.*) to rewrite the whole name),
+    and the replacement can use captured groups. A plain rule replaces the whole name.
+    """
+    repl = rule.get("set_payee")
+    if not repl:
+        return None
+    if (rule.get("match_mode") or "contains") == "regex":
+        try:
+            pat = _compiled(rule["phrase"])
+        except re.error:
+            return None
+        if not pat.search(name):
+            return None
+        try:
+            new = pat.sub(translate_replacement(repl), name, count=1)
+        except (re.error, IndexError):
+            return None
+        return collapse_ws(new) or None
+    if rule_matches(rule, (hay_raw, name.upper())):
+        return repl.strip()
+    return None
+
+
 class RuleSet:
     """Active rules in the order they should be tried."""
 
@@ -90,11 +143,17 @@ class RuleSet:
                 return rule
         return None
 
-    def payee_rewrite(self, hay_raw: str, hay_name: str) -> Optional[str]:
+    def rewrite_name(self, hay_raw: str, name: str) -> str:
+        """Apply rename rules in order. Pattern rules chain (each works on the previous result);
+        a plain rename rule is final."""
         for rule in self.rules:
-            if rule.get("set_payee") and rule_matches(rule, (hay_raw, hay_name)):
-                return rule["set_payee"].strip()
-        return None
+            new = rename_for(rule, hay_raw, name)
+            if new is None:
+                continue
+            name = new
+            if (rule.get("match_mode") or "contains") != "regex":
+                break
+        return name
 
 
 def _match_label(rule: Dict[str, Any]) -> str:
@@ -211,9 +270,7 @@ def classify(
         "reimburses_txn_id": None,
     }
 
-    rewrite = ctx.rules.payee_rewrite(hay_raw, hay_name)
-    if rewrite:
-        out["name"] = rewrite
+    out["name"] = ctx.rules.rewrite_name(hay_raw, payee)
 
     # 1. Include overrides (e.g. allowance transfers to the kids).
     rule = ctx.rules.first(("include_override",), hay_raw, hay_name)

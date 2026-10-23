@@ -34,6 +34,12 @@ class TempAppCase(unittest.TestCase):
             db_path=self.db, input_dir=self.input_dir, web_dir=os.path.join(ROOT, "web"),
             master_csv_path=os.path.join(self.tmp, "LocalStore", "master.csv"),
         )
+        # Types are chosen by the owner, never guessed from names, so say which seeded envelopes are bills.
+        c = store.connect(self.db)
+        c.execute("UPDATE envelopes SET kind='bill', rollover_mode='rollover' WHERE LOWER(name) LIKE 'insurance:%' OR LOWER(name) IN "
+                  "('property taxes', 'bills: mortgage', 'bills: every month', 'bills: subscriptions')")
+        c.commit()
+        c.close()
 
     def tearDown(self) -> None:
         for a, v in self._saved.items():

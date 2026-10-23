@@ -59,6 +59,7 @@ function openSettingsModal() {
     applyTheme(currentTheme);
     document.getElementById('settingsModalOverlay').classList.add('active');
     document.body.style.overflow = 'hidden';
+    document.dispatchEvent(new CustomEvent('settingsopen'));
 }
 
 function closeSettingsModal() {
@@ -156,11 +157,11 @@ function apiPost(path, body) {
 // ---------------------------------------------------------------------
 // Tabs
 // ---------------------------------------------------------------------
-const TABS = ['import', 'analytics'];
-let activeTab = 'analytics';
+const TABS = ['envelopes', 'analytics', 'income', 'budget', 'import'];
+let activeTab = 'envelopes';
 
 function showTab(name) {
-    if (!TABS.includes(name)) name = 'analytics';
+    if (!TABS.includes(name)) name = 'envelopes';
     activeTab = name;
     TABS.forEach(t => {
         const panel = document.getElementById('tab-' + t);
@@ -180,7 +181,7 @@ function setupTabs() {
         if (TABS.includes(name) && name !== activeTab) showTab(name);
     });
     const initial = location.hash.replace('#', '');
-    showTab(TABS.includes(initial) ? initial : 'analytics');
+    showTab(TABS.includes(initial) ? initial : 'envelopes');
 }
 
 // ---------------------------------------------------------------------

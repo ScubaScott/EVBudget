@@ -3,7 +3,10 @@
 Run this file (or launch_dashboard.bat). It opens the dashboard in your browser.
 
 Tabs:
-- Analytics: income and spending charts, filters, transaction editor, audit tool
+- Envelopes: how full each envelope is, paycheck fills, transfers, bills due
+- Spending: income and spending charts, filters, transaction editor, audit tool
+- Income: income by person over time, pay sources, planning income
+- Budget: envelope budgets and suggestions, bills, fill templates, go-live setup
 - Import: load bank CSV files, review how each row was classified, and save
 
 Everything runs on this computer. The server only accepts connections from

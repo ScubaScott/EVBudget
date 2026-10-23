@@ -14,7 +14,7 @@ import urllib.request
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import paths, rules, store
+from . import billmatch, paths, pdf_statements, rules, store
 from .textutil import (
     clean_vendor_for_lookup,
     display_name,
@@ -30,6 +30,12 @@ from .textutil import (
 # Files
 # ---------------------------------------------------------------------------
 
+IMPORT_EXTENSIONS = (".csv", ".pdf")
+
+
+def is_pdf(path: str) -> bool:
+    return path.lower().endswith(".pdf")
+
 
 def list_input_files(input_dir: Optional[str] = None) -> List[Dict[str, Any]]:
     input_dir = input_dir or paths.INPUT_DIR
@@ -37,7 +43,7 @@ def list_input_files(input_dir: Optional[str] = None) -> List[Dict[str, Any]]:
     if os.path.isdir(input_dir):
         for name in sorted(os.listdir(input_dir)):
             full = os.path.join(input_dir, name)
-            if os.path.isfile(full) and name.lower().endswith(".csv"):
+            if os.path.isfile(full) and name.lower().endswith(IMPORT_EXTENSIONS):
                 st = os.stat(full)
                 out.append({
                     "filename": name, "filepath": full, "size": st.st_size,
@@ -51,7 +57,7 @@ def save_upload(filename: str, data: bytes, input_dir: Optional[str] = None) -> 
     input_dir = input_dir or paths.INPUT_DIR
     os.makedirs(input_dir, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9 ._()\-]", "_", os.path.basename(filename)) or "upload.csv"
-    if not safe.lower().endswith(".csv"):
+    if not safe.lower().endswith(IMPORT_EXTENSIONS):
         safe += ".csv"
     target = os.path.join(input_dir, safe)
     stem, ext = os.path.splitext(safe)
@@ -87,6 +93,8 @@ def header_signature(headers: List[str]) -> str:
 
 def inspect_file_header(file_path: str, presets: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Read the header and a few rows, and guess the column mapping and account type."""
+    if is_pdf(file_path):
+        return inspect_pdf(file_path)
     try:
         with open(file_path, mode="r", encoding="utf-8-sig", errors="replace", newline="") as f:
             reader = csv.reader(f)
@@ -189,6 +197,24 @@ def inspect_file_header(file_path: str, presets: Optional[Dict[str, Any]] = None
         return {"valid": False, "error": str(exc), "filepath": file_path, "filename": os.path.basename(file_path)}
 
 
+def inspect_pdf(file_path: str) -> Dict[str, Any]:
+    """Read a statement PDF. There are no columns to map: the bank's layout is recognized instead."""
+    base = {"filename": os.path.basename(file_path), "filepath": file_path}
+    try:
+        stmt = pdf_statements.parse_statement(file_path)
+    except pdf_statements.StatementError as exc:
+        return {"valid": False, "error": str(exc), **base}
+    except Exception as exc:
+        return {"valid": False, "error": f"Could not read this PDF ({exc})", **base}
+    return {
+        "valid": True, "kind": "pdf", "headers": [], "sample_rows": [], "mapping": {}, "is_mapped": True,
+        "from_preset": False, "account_type": stmt["account_type"], "bank": stmt["bank"],
+        "account_last4": stmt["account_last4"], "period_start": stmt["period_start"],
+        "period_end": stmt["period_end"], "row_count": len(stmt["rows"]),
+        "reconciled": stmt["reconciled"], "warnings": stmt["warnings"], **base,
+    }
+
+
 def load_presets(conn: Any) -> Dict[str, Any]:
     try:
         data = json.loads(store.get_setting(conn, "import_column_presets") or "{}")
@@ -211,20 +237,29 @@ def save_preset(conn: Any, headers: List[str], mapping: Dict[str, Any], account_
 def parse_file(file_info: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], int]:
     """Read one bank file into raw rows with IDs. Returns (rows, skipped_count)."""
     file_path = file_info["filepath"]
-    mapping = file_info["mapping"]
     account_type = file_info.get("account_type", "Bank / Checking")
+    if is_pdf(file_path):
+        candidates = _pdf_candidates(file_path)
+    else:
+        candidates = _csv_candidates(file_path, file_info["mapping"])
+    return _assemble_rows(candidates, account_type, os.path.basename(file_path))
 
-    rows: List[Dict[str, Any]] = []
-    skipped = 0
-    occurrence_counts: Dict[str, int] = {}
 
+def _pdf_candidates(file_path: str) -> List[Dict[str, Any]]:
+    stmt = pdf_statements.parse_statement(file_path)
+    return [
+        {"raw_date": r["date"], "raw_name": r["description"], "amount": r["amount"], "raw_check": "",
+         "raw_ref": r["ref"], "raw_type": "Payment" if r["amount"] > 0 else ""}
+        for r in stmt["rows"]
+    ]
+
+
+def _csv_candidates(file_path: str, mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
     with open(file_path, mode="r", encoding="utf-8-sig", errors="replace", newline="") as f:
         for row in csv.DictReader(f):
             raw_date = row.get(mapping.get("date_col", ""), "") or ""
             raw_name = row.get(mapping.get("name_col", ""), "") or ""
-            raw_check = row.get(mapping.get("check_col", ""), "") or ""
-            raw_ref = row.get(mapping.get("ref_col", ""), "") or ""
-            raw_type = row.get(mapping.get("type_col", ""), "") or ""
             if not raw_date.strip() or not raw_name.strip():
                 continue
 
@@ -236,30 +271,47 @@ def parse_file(file_info: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], int]:
                 amount = parse_currency_amount(row.get(mapping.get("amount_col", ""), ""))
                 if mapping.get("sign_mode") == "inverted":
                     amount = -amount
-
-            date_iso, dt_obj = parse_date_string(raw_date)
-            if dt_obj == datetime.min:
-                skipped += 1
-                continue
-
-            check_num = raw_check.strip()
-            if not check_num:
-                m = re.search(r"\bCHECK\s*#?\s*(\d+)\b", raw_name.upper())
-                if m:
-                    check_num = m.group(1)
-
-            occ_key = f"{date_iso}|{sanitize_text(raw_name).upper()}|{amount:.2f}|{account_type.upper()}"
-            occurrence = occurrence_counts.get(occ_key, 0) + 1
-            occurrence_counts[occ_key] = occurrence
-
-            txn_id = generate_deterministic_txn_id(raw_date, raw_name, amount, account_type, raw_ref, occurrence)
-            has_bank_ref = len(re.sub(r"[^A-Za-z0-9]", "", raw_ref.strip())) >= 6
-            legacy_id = None if has_bank_ref else legacy_txn_id(raw_date, raw_name, amount, account_type, occurrence)
-            rows.append({
-                "txn_id": txn_id, "legacy_id": legacy_id, "date": date_iso, "raw_name": raw_name, "amount": round(amount, 2),
-                "check_num": check_num, "account_type": account_type, "trans_type": raw_type,
-                "source_file": os.path.basename(file_path),
+            out.append({
+                "raw_date": raw_date, "raw_name": raw_name, "amount": amount,
+                "raw_check": row.get(mapping.get("check_col", ""), "") or "",
+                "raw_ref": row.get(mapping.get("ref_col", ""), "") or "",
+                "raw_type": row.get(mapping.get("type_col", ""), "") or "",
             })
+    return out
+
+
+def _assemble_rows(candidates: List[Dict[str, Any]], account_type: str, source_file: str) -> Tuple[List[Dict[str, Any]], int]:
+    """Give each candidate its ISO date and stable transaction ID."""
+    rows: List[Dict[str, Any]] = []
+    skipped = 0
+    occurrence_counts: Dict[str, int] = {}
+    for c in candidates:
+        raw_date, raw_name, amount = c["raw_date"], c["raw_name"], c["amount"]
+        raw_ref, raw_check = c["raw_ref"], c["raw_check"]
+
+        date_iso, dt_obj = parse_date_string(raw_date)
+        if dt_obj == datetime.min:
+            skipped += 1
+            continue
+
+        check_num = raw_check.strip()
+        if not check_num:
+            m = re.search(r"\bCHECK\s*#?\s*(\d+)\b", raw_name.upper())
+            if m:
+                check_num = m.group(1)
+
+        occ_key = f"{date_iso}|{sanitize_text(raw_name).upper()}|{amount:.2f}|{account_type.upper()}"
+        occurrence = occurrence_counts.get(occ_key, 0) + 1
+        occurrence_counts[occ_key] = occurrence
+
+        txn_id = generate_deterministic_txn_id(raw_date, raw_name, amount, account_type, raw_ref, occurrence)
+        has_bank_ref = len(re.sub(r"[^A-Za-z0-9]", "", raw_ref.strip())) >= 6
+        legacy_id = None if has_bank_ref else legacy_txn_id(raw_date, raw_name, amount, account_type, occurrence)
+        rows.append({
+            "txn_id": txn_id, "legacy_id": legacy_id, "date": date_iso, "raw_name": raw_name, "amount": round(amount, 2),
+            "check_num": check_num, "account_type": account_type, "trans_type": c["raw_type"],
+            "source_file": source_file,
+        })
     return rows, skipped
 
 
@@ -431,6 +483,8 @@ def commit_import(conn: Any, records: List[Dict[str, Any]], file_names: List[str
     """Insert new rows. Existing rows only get last_seen_at and the file name noted."""
     now = datetime.now().isoformat()
     inserted = existing = rejected = excluded = review = skipped_deleted = 0
+    new_expenses = []
+    inserted_ids: List[str] = []
     try:
         for raw in records:
             rec = _clean_record(raw)
@@ -470,8 +524,15 @@ def commit_import(conn: Any, records: List[Dict[str, Any]], file_names: List[str
                 ),
             )
             inserted += 1
+            inserted_ids.append(rec["txn_id"])
+            if rec["is_included"] and rec["txn_kind"] == "expense":
+                new_expenses.append((rec["date"], rec["txn_id"]))
             excluded += 0 if rec["is_included"] else 1
             review += rec["needs_review"]
+        bills_matched = 0
+        for _, tid in sorted(new_expenses):
+            if billmatch.match_transaction(conn, tid):
+                bills_matched += 1
         cur = conn.execute(
             """INSERT INTO import_batches (created_at, files, rows_total, rows_new, rows_existing, rows_excluded, rows_needs_review)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -485,7 +546,7 @@ def commit_import(conn: Any, records: List[Dict[str, Any]], file_names: List[str
     total = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
     return {
         "inserted": inserted, "existing": existing, "rejected": rejected, "excluded": excluded,
-        "skipped_deleted": skipped_deleted,
+        "skipped_deleted": skipped_deleted, "bills_matched": bills_matched, "inserted_ids": inserted_ids,
         "needs_review": review, "batch_id": batch_id, "total_in_store": total,
     }
 

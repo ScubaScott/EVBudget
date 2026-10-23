@@ -10,10 +10,11 @@ MAX_BODY_BYTES = 64 * 1024 * 1024
 
 
 class HttpError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, **extra: Any):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.extra = extra
 
 
 class Request:
@@ -45,10 +46,11 @@ class Request:
 
 
 class Response:
-    def __init__(self, body: bytes, content_type: str, status: int = 200):
+    def __init__(self, body: bytes, content_type: str, status: int = 200, headers: Optional[Dict[str, str]] = None):
         self.body = body
         self.content_type = content_type
         self.status = status
+        self.headers = headers or {}
 
 
 def json_response(payload: Any, status: int = 200) -> Response:
@@ -125,7 +127,7 @@ def make_handler(router: Router, allowed_hosts: Set[str]):
             try:
                 response = _to_response(fn(Request(method, parsed.path, query, self.headers, raw)))
             except HttpError as err:
-                response = json_response({"success": False, "error": err.message}, err.status)
+                response = json_response(dict({"success": False, "error": err.message}, **err.extra), err.status)
             except Exception as exc:  # pragma: no cover - last-resort guard
                 traceback.print_exc()
                 response = json_response({"success": False, "error": f"Server error: {exc}"}, 500)
@@ -137,6 +139,8 @@ def make_handler(router: Router, allowed_hosts: Set[str]):
             self.send_header("Content-Length", str(len(response.body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            for k, v in response.headers.items():
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(response.body)
 

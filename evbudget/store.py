@@ -189,6 +189,7 @@ SCHEMA_STATEMENTS = [
         set_needs_review INTEGER NOT NULL DEFAULT 0,
         exclusion_reason TEXT,
         label TEXT,
+        description TEXT,
         priority INTEGER NOT NULL DEFAULT 1000,
         origin TEXT NOT NULL DEFAULT 'user',
         active INTEGER NOT NULL DEFAULT 1,
@@ -201,6 +202,12 @@ SCHEMA_STATEMENTS = [
         raw_name TEXT,
         amount REAL,
         source_file TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS audit_reviews (
+        check_id TEXT NOT NULL,
+        item_key TEXT NOT NULL,
+        reviewed_at TEXT,
+        PRIMARY KEY (check_id, item_key)
     )""",
     """CREATE TABLE IF NOT EXISTS import_batches (
         id INTEGER PRIMARY KEY,
@@ -233,6 +240,13 @@ def create_schema(conn: sqlite3.Connection) -> None:
     for col, ddl in NEW_TRANSACTION_COLUMNS:
         if col not in existing:
             conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} {ddl}")
+    # Columns added after the first v2 release
+    alloc_cols = {r[1] for r in conn.execute("PRAGMA table_info(allocations)")}
+    if "voided_income_txn_id" not in alloc_cols:
+        conn.execute("ALTER TABLE allocations ADD COLUMN voided_income_txn_id TEXT")
+    rule_cols = {r[1] for r in conn.execute("PRAGMA table_info(rules)")}
+    if "description" not in rule_cols:
+        conn.execute("ALTER TABLE rules ADD COLUMN description TEXT")
     for stmt in INDEX_STATEMENTS:
         conn.execute(stmt)
     conn.commit()
@@ -285,24 +299,22 @@ def backup_db(db_path: str, backup_dir: Optional[str] = None) -> str:
 
 
 def guess_envelope_kind(name: str) -> Dict[str, str]:
-    """Starting kind and rollover mode for an envelope, from its name."""
-    n = name.strip().lower()
-    bill_like = n.startswith("insurance:") or n in (
-        "property taxes", "bills: mortgage", "bills: every month", "bills: subscriptions",
-    )
-    return {"kind": "bill", "rollover_mode": "rollover"} if bill_like else {"kind": "spending", "rollover_mode": "reset"}
+    """Starting kind and rollover mode for an envelope. Names say nothing about the type: everything starts as
+    spending and the owner changes it in the envelope manager."""
+    return {"kind": "spending", "rollover_mode": "reset"}
 
 
 def insert_rule(conn: sqlite3.Connection, rule: Dict[str, Any]) -> int:
     cur = conn.execute(
         """INSERT INTO rules (phrase, match_mode, stage, set_kind, set_envelope, set_payee, set_income_label,
-                              set_needs_review, exclusion_reason, label, priority, origin, active, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+                              set_needs_review, exclusion_reason, label, priority, origin, active, created_at, description)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
         (
             rule["phrase"], rule.get("match_mode", "contains"), rule["stage"], rule.get("set_kind"),
             rule.get("set_envelope"), rule.get("set_payee"), rule.get("set_income_label"),
             int(rule.get("set_needs_review") or 0), rule.get("exclusion_reason"), rule.get("label"),
             int(rule.get("priority", 1000)), rule.get("origin", "user"), datetime.now().isoformat(),
+            (rule.get("description") or "").strip()[:120] or None,
         ),
     )
     return int(cur.lastrowid)
