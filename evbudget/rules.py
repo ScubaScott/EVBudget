@@ -119,12 +119,25 @@ def rename_for(rule: Dict[str, Any], hay_raw: str, name: str) -> Optional[str]:
 
 
 class RuleSet:
-    """Active rules in the order they should be tried."""
+    """Active rules in the order they should be tried.
 
-    def __init__(self, rules: Iterable[Dict[str, Any]]):
+    Personal rules are tried before shared ones, so what someone sets for themselves wins. A shared rule
+    that sends a purchase to an envelope this budget doesn't have is skipped and noted in `skipped`;
+    classify() turns that into a review flag.
+    """
+
+    def __init__(self, rules: Iterable[Dict[str, Any]], known_envelopes: Optional[Iterable[str]] = None):
         self.rules = sorted(
             (dict(r) for r in rules if r.get("active", 1)),
-            key=lambda r: (r.get("priority", 0), r.get("id") or 0),
+            key=lambda r: (r.get("scope") == "shared", r.get("priority", 0), r.get("id") or 0),
+        )
+        self.known_envelopes = None if known_envelopes is None else {e.strip().lower() for e in known_envelopes}
+        self.skipped: List[Dict[str, Any]] = []
+
+    def _envelope_missing(self, rule: Dict[str, Any]) -> bool:
+        env = (rule.get("set_envelope") or "").strip().lower()
+        return bool(
+            self.known_envelopes is not None and rule.get("scope") == "shared" and env and env not in self.known_envelopes
         )
 
     def first(self, stages: Sequence[str], hay_raw: str, hay_name: str) -> Optional[Dict[str, Any]]:
@@ -140,6 +153,9 @@ class RuleSet:
             else:
                 texts = (hay_raw, hay_name)
             if rule_matches(rule, texts):
+                if self._envelope_missing(rule):
+                    self.skipped.append(rule)
+                    continue
                 return rule
         return None
 
@@ -220,7 +236,12 @@ class ClassifyContext:
 
 def load_context(conn: Any) -> ClassifyContext:
     """Build a classification context from the database."""
-    rules = RuleSet(dict(r) for r in conn.execute("SELECT * FROM rules WHERE active = 1"))
+    rule_rows = [dict(r, scope="personal") for r in conn.execute("SELECT * FROM rules WHERE active = 1")]
+    known_envelopes = None
+    if store.has_shared(conn):
+        rule_rows += [dict(r, scope="shared") for r in conn.execute("SELECT * FROM shared.rules WHERE active = 1")]
+        known_envelopes = [r[0] for r in conn.execute("SELECT name FROM envelopes WHERE active = 1")]
+    rules = RuleSet(rule_rows, known_envelopes)
     sources = [dict(r) for r in conn.execute("SELECT * FROM income_sources WHERE active = 1 ORDER BY id")]
     expenses = ExpenseIndex()
     for r in conn.execute(
@@ -252,6 +273,18 @@ def classify(
     trans_type: str = "",
 ) -> Dict[str, Any]:
     """Classify one transaction. Returns the fields the transactions table needs."""
+    ctx.rules.skipped = []
+    out = _classify(ctx, raw_name, payee, amount, date_iso, check_num, trans_type)
+    if ctx.rules.skipped:
+        missing = ctx.rules.skipped[0]["set_envelope"]
+        out["needs_review"] = 1
+        out["match_source"] = f"{out['match_source']} (shared rule skipped: no '{missing}' envelope in this budget)"
+    return out
+
+
+def _classify(
+    ctx: ClassifyContext, raw_name: str, payee: str, amount: float, date_iso: str, check_num: str, trans_type: str
+) -> Dict[str, Any]:
     hay_raw = collapse_ws(html.unescape(raw_name or "")).upper()
     hay_name = payee.upper()
 

@@ -2132,6 +2132,7 @@ function openBulkModal(targetField) {
         document.getElementById('bulkStatusSelect').value = String(firstTxn.is_included !== undefined ? firstTxn.is_included : 1);
         document.getElementById('bulkExclusionReason').value = firstTxn.exclusion_reason || '';
         document.getElementById('bulkRulePhrase').value = firstTxn.name || '';
+        document.getElementById('bulkRuleScope').value = '';
         document.getElementById('bulkKindSelect').value = firstTxn.txn_kind || 'expense';
         document.getElementById('bulkPersonSelect').value = firstTxn.person_id ? String(firstTxn.person_id) : '';
         onBulkStatusChange();
@@ -2182,6 +2183,7 @@ async function submitBulkModalForm() {
     const applyKind = document.getElementById('bulkApplyKind').checked;
     const saveRule = document.getElementById('bulkAlwaysDoThis').checked;
     const rulePhrase = document.getElementById('bulkRulePhrase').value.trim();
+    const ruleScope = document.getElementById('bulkRuleScope').value;
 
     if (!applyPayee && !applyEnvelope && !applyStatus && !applyKind) {
         showToast("Please choose at least one field to update.", true);
@@ -2191,6 +2193,12 @@ async function submitBulkModalForm() {
     if (saveRule && !rulePhrase) {
         showToast("Please enter a match keyword or phrase for the rule.", true);
         document.getElementById('bulkRulePhrase').focus();
+        return;
+    }
+
+    if (saveRule && !ruleScope) {
+        showToast("Choose who the rule applies to: just you, or everyone.", true);
+        document.getElementById('bulkRuleScope').focus();
         return;
     }
 
@@ -2219,7 +2227,8 @@ async function submitBulkModalForm() {
         txn_ids: Array.from(selectedTxnIds),
         updates: updates,
         save_rule: saveRule,
-        rule_phrase: rulePhrase
+        rule_phrase: rulePhrase,
+        rule_scope: ruleScope
     };
 
     const saveBtn = document.getElementById('btnSaveBulkModal');

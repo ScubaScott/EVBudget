@@ -30,5 +30,6 @@ fi
 .venv/bin/python -m pip install --quiet --disable-pip-version-check -r requirements.txt \
     || echo "Could not install requirements (offline?). PDF import may not work."
 
-.venv/bin/python budget_dashboard.py
-read -r -p "Press Enter to close..."
+# Troubleshooting options go after the command, e.g.:  ./launch_dashboard.command --no-app-window   or   --keep-running
+# Closing the page or using Quit stops the server. If it stops with an error, keep the window open to read it.
+.venv/bin/python budget_dashboard.py "$@" || read -r -p "Stopped with an error. Press Enter to close..."

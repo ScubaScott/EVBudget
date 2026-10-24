@@ -145,7 +145,7 @@ class MigrationTests(unittest.TestCase):
         before = self.rows("SELECT * FROM transactions ORDER BY txn_id")
         real = store._migrate
 
-        def boom(conn):
+        def boom(conn, **options):
             conn.execute("DELETE FROM transactions")
             conn.commit()
             raise RuntimeError("simulated failure")

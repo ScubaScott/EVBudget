@@ -140,6 +140,9 @@ async function api(path, options) {
     const res = await fetch(path, options);
     let data = {};
     try { data = await res.json(); } catch (e) { /* non-JSON error body */ }
+    if (res.status === 409 && data.code === 'no_profile') {   // the server restarted: choose a budget again
+        location.href = '/';
+    }
     if (!res.ok || data.success === false) {
         throw new Error(data.error || `Request failed (${res.status})`);
     }

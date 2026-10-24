@@ -13,6 +13,9 @@ from . import core_rules, paths
 
 SCHEMA_VERSION = 2
 MAX_BACKUPS = 10
+# Shared rules get IDs from this number up, so a rule's ID says which store it is in and
+# never collides with a personal rule's ID.
+SHARED_ID_BASE = 1_000_000_000
 
 DEFAULT_SETTINGS: Dict[str, str] = {
     "bonus_threshold_pct": "50",
@@ -22,6 +25,7 @@ DEFAULT_SETTINGS: Dict[str, str] = {
     "bill_amount_tolerance_pct": "10",
     "refund_lookback_days": "120",
     "import_column_presets": "{}",
+    "import_account_names": "{}",
 }
 
 # Columns the transactions table gained in schema v2: (name, DDL type/default).
@@ -37,13 +41,14 @@ NEW_TRANSACTION_COLUMNS = [
     ("reimburses_txn_id", "TEXT"),
     ("first_imported_at", "TEXT"),
     ("last_seen_at", "TEXT"),
+    ("account_name", "TEXT"),
 ]
 
 TRANSACTION_EXPORT_COLUMNS = [
     "txn_id", "date", "name", "raw_name", "amount", "envelope", "check_num", "account_type",
     "source_file", "is_included", "exclusion_reason", "match_source", "updated_at", "txn_kind",
     "income_source_id", "person_id", "income_subtype", "income_label", "bill_id", "needs_review",
-    "user_modified", "reimburses_txn_id", "first_imported_at", "last_seen_at",
+    "user_modified", "reimburses_txn_id", "first_imported_at", "last_seen_at", "account_name",
 ]
 
 # ---------------------------------------------------------------------------
@@ -51,14 +56,21 @@ TRANSACTION_EXPORT_COLUMNS = [
 # ---------------------------------------------------------------------------
 
 
-def connect(db_path: Optional[str] = None, read_only: bool = False) -> sqlite3.Connection:
+def connect(db_path: Optional[str] = None, read_only: bool = False, shared_path: Optional[str] = None) -> sqlite3.Connection:
+    """Open a budget database. With shared_path, the shared rules database is attached as `shared`."""
     db_path = db_path or paths.DB_PATH
     if read_only:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
     else:
         conn = sqlite3.connect(db_path, timeout=10)
     conn.row_factory = sqlite3.Row
+    if shared_path:
+        conn.execute("ATTACH DATABASE ? AS shared", (shared_path,))
     return conn
+
+
+def has_shared(conn: sqlite3.Connection) -> bool:
+    return any(r[1] == "shared" for r in conn.execute("PRAGMA database_list"))
 
 
 def get_setting(conn: sqlite3.Connection, key: str) -> str:
@@ -78,6 +90,25 @@ def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
+
+RULES_DDL = """CREATE TABLE IF NOT EXISTS rules (
+        id INTEGER PRIMARY KEY,
+        phrase TEXT NOT NULL,
+        match_mode TEXT NOT NULL DEFAULT 'contains',
+        stage TEXT NOT NULL,
+        set_kind TEXT,
+        set_envelope TEXT,
+        set_payee TEXT,
+        set_income_label TEXT,
+        set_needs_review INTEGER NOT NULL DEFAULT 0,
+        exclusion_reason TEXT,
+        label TEXT,
+        description TEXT,
+        priority INTEGER NOT NULL DEFAULT 1000,
+        origin TEXT NOT NULL DEFAULT 'user',
+        active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT
+    )"""
 
 SCHEMA_STATEMENTS = [
     "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT)",
@@ -177,23 +208,13 @@ SCHEMA_STATEMENTS = [
         sort_order INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (template_id, envelope_id)
     )""",
-    """CREATE TABLE IF NOT EXISTS rules (
-        id INTEGER PRIMARY KEY,
-        phrase TEXT NOT NULL,
-        match_mode TEXT NOT NULL DEFAULT 'contains',
-        stage TEXT NOT NULL,
-        set_kind TEXT,
-        set_envelope TEXT,
-        set_payee TEXT,
-        set_income_label TEXT,
-        set_needs_review INTEGER NOT NULL DEFAULT 0,
-        exclusion_reason TEXT,
-        label TEXT,
-        description TEXT,
-        priority INTEGER NOT NULL DEFAULT 1000,
-        origin TEXT NOT NULL DEFAULT 'user',
-        active INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT
+    RULES_DDL,
+    """CREATE TABLE IF NOT EXISTS card_bill_checks (
+        card TEXT NOT NULL,
+        merchant_key TEXT NOT NULL,
+        status TEXT NOT NULL,
+        updated_at TEXT,
+        PRIMARY KEY (card, merchant_key)
     )""",
     """CREATE TABLE IF NOT EXISTS deleted_transactions (
         txn_id TEXT PRIMARY KEY,
@@ -229,6 +250,7 @@ INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_txn_income_source ON transactions(income_source_id, date)",
     "CREATE INDEX IF NOT EXISTS idx_txn_bill ON transactions(bill_id)",
     "CREATE INDEX IF NOT EXISTS idx_rules_stage ON rules(stage, priority)",
+    "CREATE INDEX IF NOT EXISTS idx_txn_account ON transactions(account_name)",
 ]
 
 
@@ -269,12 +291,12 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def backup_db(db_path: str, backup_dir: Optional[str] = None) -> str:
+def backup_db(db_path: str, backup_dir: Optional[str] = None, prefix: str = "budget_store") -> str:
     """Copy the database to the backups folder and keep the newest MAX_BACKUPS."""
     backup_dir = backup_dir or os.path.join(os.path.dirname(db_path), "backups")
     os.makedirs(backup_dir, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    target = os.path.join(backup_dir, f"budget_store_{stamp}.db")
+    target = os.path.join(backup_dir, f"{prefix}_{stamp}.db")
     src = sqlite3.connect(db_path)
     try:
         dst = sqlite3.connect(target)
@@ -284,7 +306,7 @@ def backup_db(db_path: str, backup_dir: Optional[str] = None) -> str:
             dst.close()
     finally:
         src.close()
-    existing = sorted(glob.glob(os.path.join(backup_dir, "budget_store_[0-9]*_[0-9]*.db")))
+    existing = sorted(glob.glob(os.path.join(backup_dir, f"{prefix}_[0-9]*_[0-9]*.db")))
     for old in existing[:-MAX_BACKUPS]:
         try:
             os.remove(old)
@@ -304,25 +326,32 @@ def guess_envelope_kind(name: str) -> Dict[str, str]:
     return {"kind": "spending", "rollover_mode": "reset"}
 
 
-def insert_rule(conn: sqlite3.Connection, rule: Dict[str, Any]) -> int:
+def insert_rule(conn: sqlite3.Connection, rule: Dict[str, Any], shared: bool = False, table: str = "rules") -> int:
+    """Add a rule. Shared rules get an ID from SHARED_ID_BASE up; `table` is "shared.rules" when
+    writing through a connection that has the shared database attached."""
+    rule_id = None
+    if shared:
+        top = int(conn.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}").fetchone()[0])
+        rule_id = max(top, SHARED_ID_BASE - 1) + 1
     cur = conn.execute(
-        """INSERT INTO rules (phrase, match_mode, stage, set_kind, set_envelope, set_payee, set_income_label,
+        f"""INSERT INTO {table} (id, phrase, match_mode, stage, set_kind, set_envelope, set_payee, set_income_label,
                               set_needs_review, exclusion_reason, label, priority, origin, active, created_at, description)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            rule["phrase"], rule.get("match_mode", "contains"), rule["stage"], rule.get("set_kind"),
+            rule_id, rule["phrase"], rule.get("match_mode", "contains"), rule["stage"], rule.get("set_kind"),
             rule.get("set_envelope"), rule.get("set_payee"), rule.get("set_income_label"),
             int(rule.get("set_needs_review") or 0), rule.get("exclusion_reason"), rule.get("label"),
-            int(rule.get("priority", 1000)), rule.get("origin", "user"), datetime.now().isoformat(),
+            int(rule.get("priority", 1000)), rule.get("origin", "user"), int(rule.get("active", 1)),
+            rule.get("created_at") or datetime.now().isoformat(),
             (rule.get("description") or "").strip()[:120] or None,
         ),
     )
-    return int(cur.lastrowid)
+    return int(rule_id if rule_id is not None else cur.lastrowid)
 
 
-def seed_core_rules(conn: sqlite3.Connection) -> int:
+def seed_core_rules(conn: sqlite3.Connection, shared: bool = False, table: str = "rules") -> int:
     for rule in core_rules.core_rules():
-        insert_rule(conn, rule)
+        insert_rule(conn, rule, shared, table)
     return len(core_rules.core_rules())
 
 
@@ -336,10 +365,10 @@ def _read_json(path: str) -> Any:
         return None
 
 
-def seed_legacy_rules(conn: sqlite3.Connection) -> Dict[str, int]:
+def seed_legacy_rules(conn: sqlite3.Connection, shared: bool = False, table: str = "rules") -> Dict[str, int]:
     """Bring over learned rules and known vendors from the pre-3.0 JSON files."""
     counts = {"user": 0, "vendor": 0}
-    seen = {(r[0].upper(), r[1]) for r in conn.execute("SELECT phrase, stage FROM rules")}
+    seen = {(r[0].upper(), r[1]) for r in conn.execute(f"SELECT phrase, stage FROM {table}")}
     user_phrases = set()
 
     data = _read_json(paths.LEGACY_USER_RULES_PATH) or {}
@@ -366,7 +395,7 @@ def seed_legacy_rules(conn: sqlite3.Connection) -> Dict[str, int]:
             "set_kind": "expense" if stage == "include_override" else None,
             "exclusion_reason": "User Learned Rule" if stage == "exclude" else None,
             "label": "User Learned Rule",
-        })
+        }, shared, table)
         counts["user"] += 1
 
     vendors = (_read_json(paths.LEGACY_KNOWN_VENDORS_PATH) or {}).get("vendors", {})
@@ -378,9 +407,50 @@ def seed_legacy_rules(conn: sqlite3.Connection) -> Dict[str, int]:
         insert_rule(conn, {
             "phrase": phrase, "stage": "envelope", "origin": "vendor", "match_mode": "vendor",
             "priority": 500 + min(idx, 499), "set_envelope": env, "label": "Known Vendor DB",
-        })
+        }, shared, table)
         counts["vendor"] += 1
     return counts
+
+
+def ensure_shared(shared_path: str) -> None:
+    """Create the shared rules database. The built-in rules (and any pre-3.0 learned rules) go in on first creation."""
+    os.makedirs(os.path.dirname(shared_path), exist_ok=True)
+    conn = connect(shared_path)
+    try:
+        conn.execute(RULES_DDL)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rules_stage ON rules(stage, priority)")
+        if conn.execute("SELECT COUNT(*) FROM rules").fetchone()[0] == 0:
+            seed_core_rules(conn, shared=True)
+            seed_legacy_rules(conn, shared=True)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _rule_key(r: Any) -> tuple:
+    return (
+        (r["phrase"] or "").upper(), r["stage"], r["match_mode"], r["origin"],
+        (r["set_envelope"] or "").lower(), r["set_kind"] or "", r["set_payee"] or "",
+    )
+
+
+def move_rules_to_shared(conn: sqlite3.Connection) -> int:
+    """Move every rule in this budget into the shared store (a connection with `shared` attached).
+
+    Rules that are already shared are not copied twice. Used when a single-budget install becomes a profile,
+    so the rules that applied to everything before keep applying to everyone.
+    """
+    have = {_rule_key(r): r for r in conn.execute("SELECT * FROM shared.rules")}
+    moved = 0
+    for r in conn.execute("SELECT * FROM rules ORDER BY priority, id").fetchall():
+        match = have.get(_rule_key(r))
+        if match is None:
+            insert_rule(conn, dict(r), shared=True, table="shared.rules")
+            moved += 1
+        elif not r["active"] and match["active"]:
+            conn.execute("UPDATE shared.rules SET active = 0 WHERE id = ?", (match["id"],))
+    conn.execute("DELETE FROM rules")
+    return moved
 
 
 def seed_household(conn: sqlite3.Connection) -> None:
@@ -533,14 +603,15 @@ def _retire_legacy_files() -> None:
                 pass
 
 
-def _migrate(conn: sqlite3.Connection) -> Dict[str, Any]:
+def _migrate(conn: sqlite3.Connection, shared: bool = False, fresh: bool = False) -> Dict[str, Any]:
     report: Dict[str, Any] = {}
     create_schema(conn)
     report["dates_converted"] = convert_dates_to_iso(conn)
-    if conn.execute("SELECT COUNT(*) FROM rules").fetchone()[0] == 0:
+    if not shared and conn.execute("SELECT COUNT(*) FROM rules").fetchone()[0] == 0:
         report["core_rules"] = seed_core_rules(conn)
         report["legacy_rules"] = seed_legacy_rules(conn)
-    seed_household(conn)
+    if not fresh:
+        seed_household(conn)
     seed_envelopes(conn)
     for key, value in DEFAULT_SETTINGS.items():
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value))
@@ -554,15 +625,19 @@ def _migrate(conn: sqlite3.Connection) -> Dict[str, Any]:
     return report
 
 
-def ensure_schema(db_path: Optional[str] = None) -> Dict[str, Any]:
+def ensure_schema(db_path: Optional[str] = None, shared_path: Optional[str] = None, fresh: bool = False) -> Dict[str, Any]:
     """Open the database, creating or migrating it as needed.
 
     An existing v1 database is backed up first, and restored if the migration fails.
+    With shared_path, rules come from the shared store instead of being seeded into this database.
+    `fresh` is for a brand-new profile: it starts empty instead of with the original household's people.
     """
     db_path = db_path or paths.DB_PATH
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    if shared_path:
+        ensure_shared(shared_path)
     existed = os.path.exists(db_path)
-    conn = connect(db_path)
+    conn = connect(db_path, shared_path=shared_path)
     try:
         version = get_schema_version(conn)
         if version >= SCHEMA_VERSION:
@@ -575,9 +650,9 @@ def ensure_schema(db_path: Optional[str] = None) -> Dict[str, Any]:
         conn.close()
 
     backup_path = backup_db(db_path) if has_data else ""
-    conn = connect(db_path)
+    conn = connect(db_path, shared_path=shared_path)
     try:
-        report = _migrate(conn)
+        report = _migrate(conn, shared=bool(shared_path), fresh=fresh)
     except Exception:
         conn.rollback()
         conn.close()

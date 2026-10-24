@@ -10,6 +10,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <!-- Chart.js, pinned to an exact version so an upstream release can't change the charts -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <link rel="icon" type="image/png" href="/web/img/evbudget.png">
     <link rel="stylesheet" href="/web/dashboard.css">
 </head>
 <body>
@@ -17,13 +18,17 @@
     <!-- Header Bar -->
     <header class="app-header">
         <div class="brand-area">
-            <div class="brand-icon">B</div>
+            <img class="brand-icon" src="/web/img/evbudget.png" alt="" width="36" height="36">
             <div>
                 <div class="brand-title">EVBudget</div>
                 <div class="brand-subtitle">Import, analyze, and budget your transactions</div>
             </div>
         </div>
         <div class="header-actions">
+            <!-- Which budget is open, and a way to switch -->
+            <button class="btn-refresh budget-chip" id="btnSwitchBudget" onclick="switchBudget()" title="Close this budget and choose another" hidden>
+                Budget: <strong id="budgetName"></strong> &#8644;
+            </button>
             <!-- Audit -->
             <button class="btn-refresh" id="btnAudit" onclick="openAuditDialog()" title="Look for duplicate or suspicious charges">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
@@ -48,6 +53,14 @@
                     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
                 </svg>
                 Settings
+            </button>
+            <!-- Stop the app -->
+            <button class="btn-refresh" id="btnQuit" onclick="quitApp()" title="Stop EVBudget and close it">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
+                    <line x1="12" y1="2" x2="12" y2="12"></line>
+                </svg>
+                Quit
             </button>
         </div>
     </header>
@@ -104,12 +117,14 @@
                                     <th>File</th>
                                     <th style="width: 110px;">Modified</th>
                                     <th style="width: 150px;">Already in database</th>
+                                    <th style="width: 170px;">Card / account</th>
                                     <th style="width: 170px;">Account type</th>
                                     <th style="width: 190px;">Columns</th>
                                 </tr>
                             </thead>
                             <tbody id="importFileBody"></tbody>
                         </table>
+                        <datalist id="importAccountList"></datalist>
                     </div>
                     <div class="import-actions-right">
                         <span class="import-hint" id="importProcessHint"></span>
@@ -221,6 +236,9 @@
                         <div>
                             <div class="table-title">Bills due in the next 30 days</div>
                             <div class="table-subtitle">Overdue first. "Covered" means the envelope holds at least the bill amount.</div>
+                        </div>
+                        <div class="table-header-actions">
+                            <button class="btn-refresh" onclick="openCardBillsModal()" title="Find the automatic bills charged to a card, for when its number changes">Card bills&hellip;</button>
                         </div>
                     </div>
                     <div class="table-responsive-container">
@@ -1031,6 +1049,14 @@
                             Match Keyword / Pattern in Raw Bank Description:
                         </label>
                         <input type="text" id="bulkRulePhrase" class="input-text" placeholder="e.g. PLANET FITNESS">
+                        <label style="font-size: 11.5px; font-weight: 500; color: var(--text-muted); display: block; margin: 10px 0 4px;">
+                            Who should this rule apply to?
+                        </label>
+                        <select id="bulkRuleScope" class="select-input">
+                            <option value="">Choose&hellip;</option>
+                            <option value="personal">Just me (this budget only)</option>
+                            <option value="shared">Everyone (shared with all budgets)</option>
+                        </select>
                         <div style="font-size: 11px; color: var(--text-dim); margin-top: 4px;">
                             Future CSV imports matching this phrase will automatically assign this clean payee, envelope, and status.
                         </div>
@@ -1107,6 +1133,17 @@
                             <span class="theme-check" id="themeCheckLedger">✓</span>
                         </div>
                     </div>
+                </div>
+                <div class="settings-section" id="pinSettingsSection">
+                    <label class="settings-label">Budget PIN</label>
+                    <div class="import-hint" id="pinStateText"></div>
+                    <div class="settings-pin-row">
+                        <input type="password" id="pinCurrent" class="input-text" autocomplete="off" placeholder="Current PIN" hidden>
+                        <input type="password" id="pinNew" class="input-text" autocomplete="new-password" placeholder="New PIN">
+                        <button type="button" class="btn-modal-save" onclick="saveBudgetPin()">Save PIN</button>
+                        <button type="button" class="btn-modal-cancel" id="btnRemovePin" onclick="removeBudgetPin()" hidden>Remove PIN</button>
+                    </div>
+                    <div class="import-hint">The PIN is asked for when this budget is opened. It keeps others out by accident; it does not encrypt your files. Forgot it? Delete pin.json in this budget's folder.</div>
                 </div>
                 <div class="settings-section" id="budgetSettingsSection">
                     <label class="settings-label">Budget settings</label>
@@ -1705,7 +1742,7 @@
             <div class="modal-header">
                 <div class="modal-title-wrap">
                     <div class="modal-title">Classification rules</div>
-                    <div class="modal-subtitle">Rules decide each row's kind, envelope and payee during import. Your own rules run first, then the ones that came with the app.</div>
+                    <div class="modal-subtitle">Rules decide each row's kind, envelope and payee during import. Rules marked Just me apply only to this budget and run first; rules marked Everyone are shared by all budgets.</div>
                 </div>
                 <button class="modal-close-btn" onclick="closeImportRulesModal()" title="Close">&times;</button>
             </div>
@@ -1724,6 +1761,11 @@
                         <option value="include">Keep as spending (never exclude)</option>
                     </select>
                     <select id="ruleNewEnvelope" class="select-input"></select>
+                    <select id="ruleNewScope" class="select-input" title="Who this rule applies to">
+                        <option value="">Applies to&hellip;</option>
+                        <option value="personal">Just me</option>
+                        <option value="shared">Everyone</option>
+                    </select>
                     <input type="text" id="ruleNewPayee" class="input-text" placeholder="New payee name" style="display: none;" oninput="previewNewRule()">
                     <div class="rules-save-buttons">
                         <button type="button" class="btn-modal-save" id="btnRuleSave" onclick="addImportRule()">Add rule</button>
@@ -1847,12 +1889,91 @@
     </div>
 
 
+    <!-- Automatic bills on a card -->
+    <div class="modal-overlay" id="cardBillsModalOverlay" onclick="if (event.target === this) closeCardBillsModal()">
+        <div class="modal-container wide" role="dialog" aria-modal="true">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title">Bills on a card</div>
+                    <div class="modal-subtitle">Charges that repeat on a schedule are likely automatic bills. When a card number changes, update each one with the merchant and tick it off here.</div>
+                </div>
+                <button class="modal-close-btn" onclick="closeCardBillsModal()" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="card-bills-unnamed" id="cardBillsUnnamed" hidden>
+                    <div class="settings-label">Name your cards first</div>
+                    <p class="import-hint">These earlier imports don't say which card they came from. Check the names, which can be changed, then save. New imports ask for a card name each time and remember it.</p>
+                    <div class="table-responsive-container">
+                        <table class="txn-table"><thead><tr><th>Imported from</th><th style="width: 220px;">Card / account name</th></tr></thead>
+                            <tbody id="cardBillsUnnamedBody"></tbody></table>
+                    </div>
+                    <div style="margin-top: 10px;"><button type="button" class="btn-modal-save" onclick="saveCardNames()">Save names</button></div>
+                </div>
+
+                <div class="import-hint" id="cardBillsNone" hidden>No transactions have a card name yet. Name your imports above, or choose a card name when you import the next file.</div>
+
+                <div id="cardBillsMain">
+                    <div class="card-bills-controls">
+                        <label class="settings-label" for="cardBillsCard">Card being replaced</label>
+                        <select id="cardBillsCard" class="select-input" onchange="loadCardBills()"></select>
+                        <label class="checkbox-row"><input type="checkbox" id="cardBillsMaybe" checked onchange="renderCardBills()"> Include possible bills (fewer charges)</label>
+                        <label class="checkbox-row"><input type="checkbox" id="cardBillsStopped" onchange="renderCardBills()"> Show ones that seem to have stopped</label>
+                        <label class="checkbox-row"><input type="checkbox" id="cardBillsHidden" onchange="renderCardBills()"> Show ones marked "Not a bill"</label>
+                    </div>
+                    <div class="card-bills-progress">
+                        <div class="card-bills-progress-track"><div class="card-bills-progress-bar" id="cardBillsProgressBar"></div></div>
+                        <span id="cardBillsProgressText"></span>
+                        <span class="import-hint" id="cardBillsThrough"></span>
+                    </div>
+                    <div class="table-responsive-container">
+                        <table class="txn-table income-table">
+                            <thead><tr>
+                                <th style="width: 60px; text-align:center;">Moved</th><th>Merchant</th><th style="width: 150px;">How often</th>
+                                <th style="width: 130px; text-align:right;">Usual amount</th><th style="width: 160px;">Last charge</th>
+                                <th style="width: 160px;">In your bills</th><th style="width: 100px;"></th>
+                            </tr></thead>
+                            <tbody id="cardBillsBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="modal-footer-msg">Found from your imported charges, so a bill that hasn't charged yet, or is paid another way, won't appear.</div>
+                <button type="button" class="btn-modal-save" onclick="closeCardBillsModal()">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Asks who a new rule applies to -->
+    <div class="modal-overlay" id="scopeModalOverlay" onclick="if (event.target === this) answerRuleScope(null)">
+        <div class="modal-container" role="dialog" aria-modal="true" style="max-width: 460px;">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title">Who is this rule for?</div>
+                    <div class="modal-subtitle" id="scopeModalMessage"></div>
+                </div>
+                <button class="modal-close-btn" onclick="answerRuleScope(null)" title="Cancel">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="scope-choice">
+                    <button type="button" onclick="answerRuleScope('personal')">Just me<small>Only this budget uses it, and it wins over shared rules.</small></button>
+                    <button type="button" onclick="answerRuleScope('shared')">Everyone<small>Every budget on this computer uses it. Budgets without the envelope flag the row for review.</small></button>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="modal-footer-msg"></div>
+                <button type="button" class="btn-modal-cancel" onclick="answerRuleScope(null)">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Application Footer with Required Version Display -->
     <footer class="app-footer">
         <div>Budget Tool LocalStore Visualizer & Analytics</div>
         <div class="footer-version" id="footerVersion">v{{VERSION}}</div>
     </footer>
 
+    <script src="/web/js/lifecycle.js"></script>
     <script src="/web/js/core.js"></script>
     <script src="/web/js/analytics.js"></script>
     <script src="/web/js/import.js"></script>
@@ -1860,5 +1981,7 @@
     <script src="/web/js/budget.js"></script>
     <script src="/web/js/envelopes.js"></script>
     <script src="/web/js/audit.js"></script>
+    <script src="/web/js/profiles.js"></script>
+    <script src="/web/js/cardbills.js"></script>
 </body>
 </html>

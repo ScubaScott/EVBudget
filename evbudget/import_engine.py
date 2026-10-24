@@ -14,7 +14,7 @@ import urllib.request
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import billmatch, paths, pdf_statements, rules, store
+from . import billmatch, cards, paths, pdf_statements, rules, store
 from .textutil import (
     clean_vendor_for_lookup,
     display_name,
@@ -91,10 +91,12 @@ def header_signature(headers: List[str]) -> str:
     return "|".join(sorted(h.strip().lower() for h in headers))
 
 
-def inspect_file_header(file_path: str, presets: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def inspect_file_header(
+    file_path: str, presets: Optional[Dict[str, Any]] = None, account_names: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
     """Read the header and a few rows, and guess the column mapping and account type."""
     if is_pdf(file_path):
-        return inspect_pdf(file_path)
+        return inspect_pdf(file_path, account_names)
     try:
         with open(file_path, mode="r", encoding="utf-8-sig", errors="replace", newline="") as f:
             reader = csv.reader(f)
@@ -179,6 +181,7 @@ def inspect_file_header(file_path: str, presets: Optional[Dict[str, Any]] = None
             "account_type": account_type,
             "is_mapped": is_mapped,
             "from_preset": False,
+            "account_name": (account_names or {}).get(cards.memory_key(file_path)) or cards.suggest_name(file_path),
             "mapping": {
                 "date_col": date_col, "name_col": name_col, "amount_col": amount_col,
                 "debit_col": debit_col, "credit_col": credit_col, "check_col": check_col,
@@ -197,7 +200,7 @@ def inspect_file_header(file_path: str, presets: Optional[Dict[str, Any]] = None
         return {"valid": False, "error": str(exc), "filepath": file_path, "filename": os.path.basename(file_path)}
 
 
-def inspect_pdf(file_path: str) -> Dict[str, Any]:
+def inspect_pdf(file_path: str, account_names: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Read a statement PDF. There are no columns to map: the bank's layout is recognized instead."""
     base = {"filename": os.path.basename(file_path), "filepath": file_path}
     try:
@@ -211,7 +214,10 @@ def inspect_pdf(file_path: str) -> Dict[str, Any]:
         "from_preset": False, "account_type": stmt["account_type"], "bank": stmt["bank"],
         "account_last4": stmt["account_last4"], "period_start": stmt["period_start"],
         "period_end": stmt["period_end"], "row_count": len(stmt["rows"]),
-        "reconciled": stmt["reconciled"], "warnings": stmt["warnings"], **base,
+        "reconciled": stmt["reconciled"], "warnings": stmt["warnings"],
+        "account_name": (account_names or {}).get(cards.pdf_key(stmt["bank"], stmt["account_last4"]))
+        or cards.pdf_name(stmt["bank"], stmt["account_last4"]),
+        "memory_key": cards.pdf_key(stmt["bank"], stmt["account_last4"]), **base,
     }
 
 
@@ -242,7 +248,7 @@ def parse_file(file_info: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], int]:
         candidates = _pdf_candidates(file_path)
     else:
         candidates = _csv_candidates(file_path, file_info["mapping"])
-    return _assemble_rows(candidates, account_type, os.path.basename(file_path))
+    return _assemble_rows(candidates, account_type, os.path.basename(file_path), cards.clean_name(file_info.get("account_name")))
 
 
 def _pdf_candidates(file_path: str) -> List[Dict[str, Any]]:
@@ -280,7 +286,9 @@ def _csv_candidates(file_path: str, mapping: Dict[str, Any]) -> List[Dict[str, A
     return out
 
 
-def _assemble_rows(candidates: List[Dict[str, Any]], account_type: str, source_file: str) -> Tuple[List[Dict[str, Any]], int]:
+def _assemble_rows(
+    candidates: List[Dict[str, Any]], account_type: str, source_file: str, account_name: str = ""
+) -> Tuple[List[Dict[str, Any]], int]:
     """Give each candidate its ISO date and stable transaction ID."""
     rows: List[Dict[str, Any]] = []
     skipped = 0
@@ -310,7 +318,7 @@ def _assemble_rows(candidates: List[Dict[str, Any]], account_type: str, source_f
         rows.append({
             "txn_id": txn_id, "legacy_id": legacy_id, "date": date_iso, "raw_name": raw_name, "amount": round(amount, 2),
             "check_num": check_num, "account_type": account_type, "trans_type": c["raw_type"],
-            "source_file": source_file,
+            "source_file": source_file, "account_name": account_name,
         })
     return rows, skipped
 
@@ -322,7 +330,7 @@ def _assemble_rows(candidates: List[Dict[str, Any]], account_type: str, source_f
 RECORD_FIELDS = [
     "txn_id", "date", "name", "raw_name", "amount", "envelope", "check_num", "account_type", "source_file",
     "is_included", "exclusion_reason", "match_source", "txn_kind", "income_source_id", "person_id",
-    "income_subtype", "income_label", "needs_review", "reimburses_txn_id",
+    "income_subtype", "income_label", "needs_review", "reimburses_txn_id", "account_name",
 ]
 
 
@@ -394,7 +402,7 @@ def build_preview(conn: Any, file_infos: List[Dict[str, Any]]) -> Dict[str, Any]
         rec.update(
             txn_id=r["txn_id"], date=r["date"], raw_name=r["raw_name"], amount=r["amount"],
             check_num=r["check_num"], account_type=r["account_type"], source_file=r["source_file"],
-            is_included=bool(res["is_included"]), status="deleted" if was_deleted else "new", edited=False,
+            account_name=r["account_name"], is_included=bool(res["is_included"]), status="deleted" if was_deleted else "new", edited=False,
         )
         records.append(rec)
 
@@ -405,7 +413,7 @@ def build_preview(conn: Any, file_infos: List[Dict[str, Any]]) -> Dict[str, Any]
             rec = {k: e.get(k) for k in RECORD_FIELDS}
             rec.update(
                 is_included=bool(e.get("is_included")), status="existing", edited=False,
-                seen_in_file=r["source_file"],
+                seen_in_file=r["source_file"], account_name=e.get("account_name") or r["account_name"],
             )
             records.append(rec)
 
@@ -459,6 +467,7 @@ def _clean_record(r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "check_num": str(r.get("check_num") or "").strip(),
         "account_type": str(r.get("account_type") or "").strip(),
         "source_file": str(r.get("source_file") or "").strip(),
+        "account_name": cards.clean_name(r.get("account_name")) or None,
         "seen_in_file": str(r.get("seen_in_file") or "").strip(),
         "restore": bool(r.get("restore")),
         "is_included": 1 if included else 0,
@@ -498,8 +507,9 @@ def commit_import(conn: Any, records: List[Dict[str, Any]], file_names: List[str
                 if seen_in and seen_in not in files:
                     files.append(seen_in)
                 conn.execute(
-                    "UPDATE transactions SET last_seen_at = ?, source_file = ? WHERE txn_id = ?",
-                    (now, ", ".join(files), rec["txn_id"]),
+                    "UPDATE transactions SET last_seen_at = ?, source_file = ?, "
+                    "account_name = COALESCE(NULLIF(account_name, ''), ?) WHERE txn_id = ?",
+                    (now, ", ".join(files), rec["account_name"], rec["txn_id"]),
                 )
                 existing += 1
                 continue
@@ -513,14 +523,14 @@ def commit_import(conn: Any, records: List[Dict[str, Any]], file_names: List[str
                        txn_id, date, name, raw_name, amount, envelope, check_num, account_type, source_file,
                        is_included, exclusion_reason, match_source, updated_at, txn_kind, income_source_id,
                        person_id, income_subtype, income_label, needs_review, user_modified,
-                       reimburses_txn_id, first_imported_at, last_seen_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       reimburses_txn_id, first_imported_at, last_seen_at, account_name)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     rec["txn_id"], rec["date"], rec["name"], rec["raw_name"], rec["amount"], rec["envelope"],
                     rec["check_num"], rec["account_type"], rec["source_file"], rec["is_included"],
                     rec["exclusion_reason"], rec["match_source"], now, rec["txn_kind"], rec["income_source_id"],
                     rec["person_id"], rec["income_subtype"], rec["income_label"], rec["needs_review"],
-                    rec["user_modified"], rec["reimburses_txn_id"], now, now,
+                    rec["user_modified"], rec["reimburses_txn_id"], now, now, rec["account_name"],
                 ),
             )
             inserted += 1

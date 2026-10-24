@@ -2,15 +2,25 @@
 
 import mimetypes
 import os
+import threading
+import time
+import traceback
 from datetime import datetime, timedelta
 from email.parser import BytesParser
 from email.policy import HTTP as HTTP_POLICY
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import VERSION, audit, billmatch, budget, import_engine, ledger, income, paths, recurrence, reclassify, rules, store
+from . import VERSION, audit, billmatch, budget, cardbills, cards, import_engine, ledger, income, paths, recurrence, reclassify, rules, store
+from . import profiles as profiles_mod
 from . import envelopes as env_mod
 from .http_util import HttpError, Request, Response, Router
 from .textutil import is_iso_date, to_iso_date
+
+# Open pages say they are alive every few seconds. A page that goes quiet this long is treated as gone
+# (browsers slow background tabs to about one beat a minute, so this is well above that).
+PAGE_TIMEOUT_SECONDS = 150.0
+# Once no page is left, wait this long before stopping, so a reload or moving between pages doesn't stop the app.
+CLOSE_GRACE_SECONDS = 15.0
 
 STATIC_TYPES = {
     ".css": "text/css; charset=utf-8",
@@ -26,7 +36,7 @@ TRANSACTION_FIELDS = [
     "txn_id", "date", "name", "raw_name", "amount", "envelope", "check_num", "account_type", "source_file",
     "is_included", "exclusion_reason", "match_source", "updated_at", "txn_kind", "income_source_id",
     "person_id", "income_subtype", "income_label", "bill_id", "needs_review", "user_modified",
-    "reimburses_txn_id",
+    "reimburses_txn_id", "account_name",
 ]
 
 EDITABLE_SETTINGS = (
@@ -68,7 +78,12 @@ def _find_envelope(conn: Any, name: str) -> Optional[Any]:
 
 
 class App:
-    """Holds file locations and builds the route table."""
+    """Holds file locations and builds the route table.
+
+    With `profiles`, no budget is open until one is chosen (open_profile) and the file locations belong to
+    that profile. Without it the app works on one fixed budget, from db_path and the other arguments.
+    Either way, rules the budgets share live in shared_db_path when that is set.
+    """
 
     def __init__(
         self,
@@ -76,14 +91,141 @@ class App:
         input_dir: Optional[str] = None,
         web_dir: Optional[str] = None,
         master_csv_path: Optional[str] = None,
+        shared_db_path: Optional[str] = None,
+        profiles: Optional[profiles_mod.Profiles] = None,
     ):
-        self.db_path = db_path or paths.DB_PATH
-        self.input_dir = input_dir or paths.INPUT_DIR
+        self.profiles = profiles
+        self.profile_name: Optional[str] = None
+        self._auto_open_allowed = True  # off after someone chooses "switch budget", so the picker can be reached
+        self.shared_db_path = shared_db_path or (profiles.shared_db_path if profiles else None)
+        fixed = profiles is None
+        self._db_path = db_path or (paths.DB_PATH if fixed else None)
+        self._input_dir = input_dir or (paths.INPUT_DIR if fixed else None)
+        self._master_csv_path = master_csv_path or (paths.MASTER_CSV_PATH if fixed else None)
         self.web_dir = os.path.realpath(web_dir or paths.WEB_DIR)
-        self.master_csv_path = master_csv_path or paths.MASTER_CSV_PATH
+        # Which browser pages are open, so the app can stop itself when the last one closes
+        self.clock = time.monotonic
+        self.request_shutdown = None  # set by the server: a function that stops it
+        self._pages: Dict[str, float] = {}
+        self._page_ever_seen = False
+        self._empty_since: Optional[float] = None
+        self._pages_lock = threading.Lock()
+
+    @staticmethod
+    def _open_only(value: Optional[str]) -> str:
+        if value is None:
+            raise HttpError(409, "No budget is open. Choose one first.", code="no_profile")
+        return value
+
+    @property
+    def db_path(self) -> str:
+        return self._open_only(self._db_path)
+
+    @property
+    def input_dir(self) -> str:
+        return self._open_only(self._input_dir)
+
+    @property
+    def master_csv_path(self) -> str:
+        return self._open_only(self._master_csv_path)
 
     def conn(self) -> Any:
-        return store.connect(self.db_path)
+        return store.connect(self.db_path, shared_path=self.shared_db_path)
+
+    # ---------------------------------------------------------------- profiles
+
+    def _need_profiles(self) -> profiles_mod.Profiles:
+        if self.profiles is None:
+            raise HttpError(400, "This copy of the app is running a single fixed budget.")
+        return self.profiles
+
+    def _activate(self, name: str) -> Dict[str, Any]:
+        paths_ = self._need_profiles().profile_paths(name)
+        report = store.ensure_schema(paths_["db"], self.shared_db_path)
+        os.makedirs(paths_["input"], exist_ok=True)
+        self._db_path, self._input_dir, self._master_csv_path = paths_["db"], paths_["input"], paths_["csv"]
+        self.profile_name = paths_["name"]
+        self.profiles.set_last_used(paths_["name"])
+        try:  # the shared rules are small and shared by everyone, so keep a copy each time a budget opens
+            store.backup_db(self.shared_db_path, backup_dir=os.path.join(os.path.dirname(self.shared_db_path), "backups"),
+                            prefix="shared_rules")
+        except Exception:
+            pass
+        self.sync_csv()
+        return report
+
+    def _auto_open_only_budget(self) -> None:
+        """With exactly one budget, no PIN, and nothing older waiting to be moved into a budget, there is nothing to choose: open it."""
+        pr = self.profiles
+        if pr is None or self.profile_name is not None or not self._auto_open_allowed or pr.legacy_found():
+            return
+        names = pr.names()
+        if len(names) == 1 and not pr.has_pin(names[0]):
+            try:
+                self._activate(names[0])
+            except Exception:  # fall back to the picker, which shows the problem when the budget is opened
+                traceback.print_exc()
+
+    def close_profile(self) -> None:
+        self._auto_open_allowed = False
+        self.profile_name = None
+        if self.profiles is not None:
+            self._db_path = self._input_dir = self._master_csv_path = None
+
+    def profiles_list(self, req: Request) -> Any:
+        pr = self._need_profiles()
+        return {
+            "profiles": pr.listing(), "active": self.profile_name, "legacy_found": pr.legacy_found(),
+            "min_pin_length": profiles_mod.MIN_PIN_LENGTH,
+        }
+
+    def profile_open(self, req: Request) -> Any:
+        pr = self._need_profiles()
+        data = req.json()
+        try:
+            name = pr.profile_paths(str(data.get("name") or ""))["name"]
+            if not pr.check_pin(name, str(data.get("pin") or "")):
+                raise HttpError(403, "That PIN is not right.", code="bad_pin")
+            self._activate(name)
+        except profiles_mod.ProfileError as exc:
+            raise HttpError(400, str(exc))
+        return {"success": True, "name": self.profile_name}
+
+    def profile_create(self, req: Request) -> Any:
+        pr = self._need_profiles()
+        data = req.json()
+        try:
+            created = pr.create(str(data.get("name") or ""), str(data.get("pin") or ""))
+            self._activate(created["name"])
+        except profiles_mod.ProfileError as exc:
+            raise HttpError(400, str(exc))
+        return {"success": True, "name": self.profile_name}
+
+    def profile_migrate(self, req: Request) -> Any:
+        pr = self._need_profiles()
+        try:
+            result = pr.migrate_legacy(str(req.json().get("name") or ""))
+            self._activate(result["name"])
+        except profiles_mod.ProfileError as exc:
+            raise HttpError(400, str(exc))
+        return {"success": True, **result}
+
+    def profile_close(self, req: Request) -> Any:
+        self._need_profiles()
+        self.close_profile()
+        return {"success": True}
+
+    def profile_pin(self, req: Request) -> Any:
+        """Set, change or remove the PIN of the open budget. An empty new_pin removes it."""
+        pr = self._need_profiles()
+        if self.profile_name is None:
+            self._open_only(None)
+        data = req.json()
+        try:
+            has_pin = pr.set_pin(self.profile_name, str(data.get("current_pin") or ""), str(data.get("new_pin") or ""))
+        except profiles_mod.ProfileError as exc:
+            raise HttpError(400, str(exc))
+        return {"success": True, "has_pin": has_pin}
 
     def sync_csv(self) -> None:
         store.sync_master_csv(self.db_path, self.master_csv_path)
@@ -91,9 +233,11 @@ class App:
     # ------------------------------------------------------------------ pages
 
     def page(self, req: Request) -> Response:
-        path = os.path.join(self.web_dir, "dashboard.html")
+        self._auto_open_only_budget()
+        page_name = "profiles.html" if self.profiles is not None and self.profile_name is None else "dashboard.html"
+        path = os.path.join(self.web_dir, page_name)
         if not os.path.exists(path):
-            return Response(f"<h1>dashboard.html not found at {path}</h1>".encode(), "text/html; charset=utf-8", 500)
+            return Response(f"<h1>{page_name} not found at {path}</h1>".encode(), "text/html; charset=utf-8", 500)
         with open(path, "r", encoding="utf-8") as f:
             html_text = f.read().replace("{{VERSION}}", f"{VERSION:.1f}")
         return Response(html_text.encode("utf-8"), "text/html; charset=utf-8")
@@ -108,8 +252,48 @@ class App:
         with open(full, "rb") as f:
             return Response(f.read(), ctype)
 
+    # ---------------------------------------------------------------- lifecycle
+
+    def heartbeat(self, req: Request) -> Any:
+        page = str(req.json().get("page") or "")[:64]
+        if page:
+            with self._pages_lock:
+                self._pages[page] = self.clock()
+                self._page_ever_seen = True
+        return {"success": True}
+
+    def page_closed(self, req: Request) -> Any:
+        with self._pages_lock:
+            self._pages.pop(str(req.json().get("page") or "")[:64], None)
+        return {"success": True}
+
+    def should_exit(self) -> bool:
+        """True once pages have been open and every one of them has been gone for CLOSE_GRACE_SECONDS."""
+        now = self.clock()
+        with self._pages_lock:
+            for page, seen in list(self._pages.items()):
+                if now - seen > PAGE_TIMEOUT_SECONDS:
+                    del self._pages[page]
+            if self._pages:
+                self._empty_since = None
+                return False
+            if not self._page_ever_seen:
+                return False
+            if self._empty_since is None:
+                self._empty_since = now
+            return now - self._empty_since >= CLOSE_GRACE_SECONDS
+
+    def shutdown(self, req: Request) -> Any:
+        # Needs a JSON body, which another website cannot send to this server without being refused.
+        if "application/json" not in req.content_type:
+            raise HttpError(400, "Expected JSON")
+        if self.request_shutdown is None:
+            raise HttpError(400, "This server can't be stopped from the page.")
+        self.request_shutdown()
+        return {"success": True}
+
     def health(self, req: Request) -> Dict[str, Any]:
-        return {"status": "ok", "version": f"{VERSION:.1f}"}
+        return {"status": "ok", "version": f"{VERSION:.1f}", "budget": self.profile_name}
 
     # ----------------------------------------------------------- transactions
 
@@ -123,7 +307,7 @@ class App:
                 d = {k: r[k] for k in TRANSACTION_FIELDS}
                 d["amount"] = float(d["amount"])
                 for k in ("name", "raw_name", "envelope", "check_num", "account_type", "source_file",
-                          "exclusion_reason", "match_source", "income_label", "income_subtype"):
+                          "exclusion_reason", "match_source", "income_label", "income_subtype", "account_name"):
                     d[k] = d[k] or ""
                 d["is_included"] = int(d["is_included"]) if d["is_included"] is not None else 1
                 d["needs_review"] = int(d["needs_review"] or 0)
@@ -332,7 +516,7 @@ class App:
             rule_saved = False
             phrase = str(data.get("rule_phrase") or "").strip()
             if data.get("save_rule") and phrase:
-                save_user_rules_from_bulk(conn, phrase, updates, kind, included)
+                save_user_rules_from_bulk(conn, phrase, updates, kind, included, self._choose_scope(conn, data.get("rule_scope")))
                 rule_saved = True
             conn.commit()
         finally:
@@ -480,10 +664,28 @@ class App:
     def get_rules(self, req: Request) -> Any:
         conn = self.conn()
         try:
-            rows = [dict(r) for r in conn.execute("SELECT * FROM rules ORDER BY stage, priority, id")]
-            return {"rules": rows, "stages": list(rules.STAGES), "kinds": list(rules.KINDS)}
+            rows = [dict(r, scope="personal") for r in conn.execute("SELECT * FROM rules")]
+            shared = store.has_shared(conn)
+            if shared:
+                rows += [dict(r, scope="shared") for r in conn.execute("SELECT * FROM shared.rules")]
+            rows.sort(key=lambda r: (r["stage"], r["scope"] == "shared", r["priority"], r["id"]))
+            return {"rules": rows, "stages": list(rules.STAGES), "kinds": list(rules.KINDS), "has_shared": shared}
         finally:
             conn.close()
+
+    @staticmethod
+    def _rule_table(rule_id: int) -> str:
+        """Which store a rule is in follows from its ID (see store.SHARED_ID_BASE)."""
+        return "shared.rules" if int(rule_id) >= store.SHARED_ID_BASE else "rules"
+
+    @staticmethod
+    def _choose_scope(conn: Any, scope: Any) -> str:
+        """The scope for a new rule. Where rules can be shared the person must say which; there is no default."""
+        if not store.has_shared(conn):
+            return "personal"
+        if scope not in ("personal", "shared"):
+            raise HttpError(400, "Choose whether this rule is just for you or for everyone.")
+        return scope
 
     def save_rule(self, req: Request) -> Any:
         data = req.json()
@@ -516,18 +718,29 @@ class App:
         conn = self.conn()
         try:
             rule_id = data.get("id")
-            if rule_id:
-                cur = conn.execute(
-                    """UPDATE rules SET phrase=:phrase, match_mode=:match_mode, stage=:stage, set_kind=:set_kind,
-                              set_envelope=:set_envelope, set_payee=:set_payee, set_income_label=:set_income_label,
-                              set_needs_review=:set_needs_review, exclusion_reason=:exclusion_reason,
-                              description=:description, active=:active WHERE id=:id""",
-                    dict(fields, id=int(rule_id), active=0 if data.get("active") in (0, False) else 1),
-                )
-                if cur.rowcount == 0:
-                    raise HttpError(404, "Rule not found")
+            if not rule_id:
+                rule_id = save_user_rule(conn, dict(fields, scope=self._choose_scope(conn, data.get("scope"))))
             else:
-                rule_id = save_user_rule(conn, fields)
+                table = self._rule_table(rule_id)
+                current = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (int(rule_id),)).fetchone()
+                if current is None:
+                    raise HttpError(404, "Rule not found")
+                active = 0 if data.get("active") in (0, False) else 1
+                scope = data.get("scope")
+                if scope in ("personal", "shared") and store.has_shared(conn) and (scope == "shared") != (table == "shared.rules"):
+                    # Changing who a rule applies to moves it to the other store, keeping its place in the order.
+                    moved = dict(current, **fields, active=active)
+                    conn.execute(f"DELETE FROM {table} WHERE id = ?", (int(rule_id),))
+                    shared = scope == "shared"
+                    rule_id = store.insert_rule(conn, moved, shared=shared, table="shared.rules" if shared else "rules")
+                else:
+                    conn.execute(
+                        f"""UPDATE {table} SET phrase=:phrase, match_mode=:match_mode, stage=:stage, set_kind=:set_kind,
+                                  set_envelope=:set_envelope, set_payee=:set_payee, set_income_label=:set_income_label,
+                                  set_needs_review=:set_needs_review, exclusion_reason=:exclusion_reason,
+                                  description=:description, active=:active WHERE id=:id""",
+                        dict(fields, id=int(rule_id), active=active),
+                    )
             conn.commit()
             return {"success": True, "id": rule_id}
         finally:
@@ -591,7 +804,7 @@ class App:
             raise HttpError(400, "Missing rule id")
         conn = self.conn()
         try:
-            conn.execute("DELETE FROM rules WHERE id = ?", (int(rule_id),))
+            conn.execute(f"DELETE FROM {self._rule_table(rule_id)} WHERE id = ?", (int(rule_id),))
             conn.commit()
             return {"success": True}
         finally:
@@ -637,6 +850,8 @@ class App:
         try:
             presets = import_engine.load_presets(conn)
             counts = self._imported_counts(conn)
+            account_names = cards.load_memory(conn)
+            known_accounts = cards.known_names(conn)
         finally:
             conn.close()
         out = []
@@ -646,11 +861,11 @@ class App:
             except FileNotFoundError:
                 out.append({"valid": False, "filename": name, "error": "File not found"})
                 continue
-            info = import_engine.inspect_file_header(path, presets)
+            info = import_engine.inspect_file_header(path, presets, account_names)
             info.pop("filepath", None)
             info["imported_rows"] = counts.get(info.get("filename", name), 0)
             out.append(info)
-        return {"files": out}
+        return {"files": out, "accounts": known_accounts}
 
     def _resolve_file_configs(self, configs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         resolved = []
@@ -667,6 +882,8 @@ class App:
                     mapping.get("date_col") and mapping.get("name_col")
                     and (mapping.get("amount_col") or mapping.get("is_dual"))),
                 "headers": fc.get("headers") or [],
+                "account_name": cards.clean_name(fc.get("account_name")),
+                "memory_key": str(fc.get("memory_key") or "") or cards.memory_key(path),
             })
         return resolved
 
@@ -679,6 +896,7 @@ class App:
             for fc in configs:
                 if fc["is_mapped"] and fc["headers"]:
                     import_engine.save_preset(conn, fc["headers"], fc["mapping"], fc["account_type"])
+                cards.remember(conn, fc["memory_key"], fc["account_name"])
             conn.commit()
             preview = import_engine.build_preview(conn, configs)
             preview["people"] = [dict(r) for r in conn.execute("SELECT id, name FROM people WHERE active = 1 ORDER BY id")]
@@ -1010,6 +1228,34 @@ class App:
         return Response(("\ufeff" + out["text"]).encode("utf-8"), "text/csv; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="{out["filename"]}"'})
 
+    def get_cards(self, req: Request) -> Any:
+        """Card names in use, and earlier imports that still have none."""
+        return self._run(lambda c: {"cards": cards.list_cards(c), "unnamed": cards.unnamed_groups(c, self.input_dir)})
+
+    def name_cards(self, req: Request) -> Any:
+        assignments = req.json().get("assignments") or []
+        return self._run(lambda c: {"success": True, "named": cards.name_groups(c, assignments, self.input_dir)})
+
+    def card_bills(self, req: Request) -> Any:
+        card = req.query.get("card", "").strip()
+        if not card:
+            raise HttpError(400, "Choose a card")
+        return self._run(lambda c: cardbills.find_bills(c, card))
+
+    def mark_card_bill(self, req: Request) -> Any:
+        data = req.json()
+        card, key, status = str(data.get("card") or "").strip(), str(data.get("key") or "").strip(), str(data.get("status") or "")
+        if not card or not key:
+            raise HttpError(400, "Missing card or bill")
+
+        def work(c):
+            try:
+                cardbills.set_status(c, card, key, status)
+            except ValueError as exc:
+                raise HttpError(400, str(exc))
+            return {"success": True}
+        return self._run(work)
+
     def discover_bills(self, req: Request) -> Any:
         return self._run(lambda c: {"candidates": env_mod.discover_bills(c)})
 
@@ -1140,6 +1386,15 @@ class App:
         r.add_prefix("GET", "/web/", self.static)
         r.add("GET", "/favicon.ico", lambda req: Response(b"", "image/x-icon", 204))
         r.add("GET", "/api/health", self.health)
+        r.add("POST", "/api/heartbeat", self.heartbeat)
+        r.add("POST", "/api/page-closed", self.page_closed)
+        r.add("POST", "/api/shutdown", self.shutdown)
+        r.add("GET", "/api/profiles", self.profiles_list)
+        r.add("POST", "/api/profiles/open", self.profile_open)
+        r.add("POST", "/api/profiles/create", self.profile_create)
+        r.add("POST", "/api/profiles/migrate", self.profile_migrate)
+        r.add("POST", "/api/profiles/close", self.profile_close)
+        r.add("POST", "/api/profiles/pin", self.profile_pin)
         r.add("GET", "/api/transactions", self.get_transactions)
         r.add("POST", "/api/transactions/update", self.update_transaction)
         r.add("POST", "/api/transactions/delete", self.delete_transaction)
@@ -1169,6 +1424,10 @@ class App:
         r.add("GET", "/api/envelopes/ledger", self.envelope_ledger)
         r.add("GET", "/api/envelopes/ledger.csv", self.ledger_csv)
         r.add("GET", "/api/bills/discover", self.discover_bills)
+        r.add("GET", "/api/cards", self.get_cards)
+        r.add("POST", "/api/cards/name", self.name_cards)
+        r.add("GET", "/api/cards/bills", self.card_bills)
+        r.add("POST", "/api/cards/bills/mark", self.mark_card_bill)
         r.add("POST", "/api/bills/dismiss", self.dismiss_bill_candidate)
         r.add("GET", "/api/bills/upcoming", self.upcoming_bills)
         r.add("POST", "/api/bills/link", self.link_bill)
@@ -1215,15 +1474,18 @@ class App:
 def save_user_rule(conn: Any, fields: Dict[str, Any]) -> int:
     """Add a user rule, or update the user rule with the same phrase and stage.
 
+    fields["scope"] is "shared" (everyone's rules) or "personal" (this budget only; the default).
     New rules go ahead of older ones so a more specific, newer rule wins.
     """
+    shared = fields.get("scope") == "shared"
+    table = "shared.rules" if shared else "rules"
     existing = conn.execute(
-        "SELECT id FROM rules WHERE origin = 'user' AND stage = ? AND UPPER(phrase) = UPPER(?)",
+        f"SELECT id FROM {table} WHERE origin = 'user' AND stage = ? AND UPPER(phrase) = UPPER(?)",
         (fields["stage"], fields["phrase"]),
     ).fetchone()
     if existing:
         conn.execute(
-            """UPDATE rules SET match_mode=?, set_kind=?, set_envelope=?, set_payee=?, set_income_label=?,
+            f"""UPDATE {table} SET match_mode=?, set_kind=?, set_envelope=?, set_payee=?, set_income_label=?,
                       set_needs_review=?, exclusion_reason=?, description=COALESCE(?, description), active=1 WHERE id=?""",
             (
                 fields.get("match_mode", "contains"), fields.get("set_kind"), fields.get("set_envelope"),
@@ -1232,16 +1494,17 @@ def save_user_rule(conn: Any, fields: Dict[str, Any]) -> int:
             ),
         )
         return int(existing["id"])
-    low = conn.execute("SELECT MIN(priority) FROM rules WHERE origin = 'user'").fetchone()[0]
-    rule = dict(fields)
+    low = conn.execute(f"SELECT MIN(priority) FROM {table} WHERE origin = 'user'").fetchone()[0]
+    rule = {k: v for k, v in fields.items() if k != "scope"}
     rule["origin"] = "user"
     rule["priority"] = (low if low is not None else 100) - 1
-    rule.setdefault("label", "User Learned Rule")
     rule["label"] = rule.get("label") or "User Learned Rule"
-    return store.insert_rule(conn, rule)
+    return store.insert_rule(conn, rule, shared=shared, table=table)
 
 
-def save_user_rules_from_bulk(conn: Any, phrase: str, updates: Dict[str, Any], kind: Optional[str], included: Optional[int]) -> None:
+def save_user_rules_from_bulk(
+    conn: Any, phrase: str, updates: Dict[str, Any], kind: Optional[str], included: Optional[int], scope: str = "personal"
+) -> None:
     """Turn a bulk edit with 'always do this' into learned rules."""
     envelope = (updates.get("envelope") or "").strip() or None
     payee = (updates.get("name") or "").strip() or None
@@ -1249,17 +1512,17 @@ def save_user_rules_from_bulk(conn: Any, phrase: str, updates: Dict[str, Any], k
     # with the same phrase isn't pulled into it.
     expense_envelope = None if kind in ("refund", "other_income") else envelope
     if expense_envelope or payee:
-        save_user_rule(conn, {"phrase": phrase, "stage": "envelope" if expense_envelope else "payee",
+        save_user_rule(conn, {"scope": scope, "phrase": phrase, "stage": "envelope" if expense_envelope else "payee",
                               "set_envelope": expense_envelope, "set_payee": payee})
     if kind in rules.EXCLUDED_KINDS:
-        save_user_rule(conn, {"phrase": phrase, "stage": "exclude", "set_kind": kind,
+        save_user_rule(conn, {"scope": scope, "phrase": phrase, "stage": "exclude", "set_kind": kind,
                               "exclusion_reason": (updates.get("exclusion_reason") or "").strip() or "User Learned Rule"})
     elif kind in ("refund", "other_income"):
-        save_user_rule(conn, {"phrase": phrase, "stage": "refund" if kind == "refund" else "income", "set_kind": kind,
+        save_user_rule(conn, {"scope": scope, "phrase": phrase, "stage": "refund" if kind == "refund" else "income", "set_kind": kind,
                               "set_envelope": envelope if kind == "refund" else None,
                               "set_income_label": (updates.get("income_label") or "").strip() or None})
     elif included is not None and kind is None:
         stage = "include_override" if int(included) == 1 else "exclude"
-        save_user_rule(conn, {"phrase": phrase, "stage": stage, "set_envelope": envelope,
+        save_user_rule(conn, {"scope": scope, "phrase": phrase, "stage": stage, "set_envelope": envelope,
                               "set_kind": "expense" if stage == "include_override" else None,
                               "exclusion_reason": (updates.get("exclusion_reason") or "").strip() or "User Learned Rule"})

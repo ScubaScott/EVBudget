@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EVBudget: choose a budget</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="icon" type="image/png" href="/web/img/evbudget.png">
+    <link rel="stylesheet" href="/web/dashboard.css">
+</head>
+<body class="profile-picker">
+    <header class="app-header">
+        <div class="brand-area">
+            <img class="brand-icon" src="/web/img/evbudget.png" alt="" width="36" height="36">
+            <div>
+                <div class="brand-title">EVBudget</div>
+                <div class="brand-subtitle">Choose whose budget to open</div>
+            </div>
+        </div>
+        <div class="header-actions">
+            <button class="btn-refresh" onclick="quitApp()" title="Stop EVBudget and close it">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
+                    <line x1="12" y1="2" x2="12" y2="12"></line>
+                </svg>
+                Quit
+            </button>
+        </div>
+    </header>
+
+    <main class="picker-main">
+        <div class="picker-error" id="pickerError" role="alert" hidden></div>
+
+        <section class="picker-card-box" id="legacyBox" hidden>
+            <h2>Your existing budget</h2>
+            <p>This copy has a budget from before budgets could be separated. Give it a name to keep working with it. Nothing is lost:
+               its files move into a folder for that name, and a backup is kept. The rules it learned become shared rules, so other budgets get them too.</p>
+            <div class="picker-row">
+                <input type="text" id="legacyName" class="input-text" maxlength="40" placeholder="Name for this budget (e.g. Scott)" onkeydown="if (event.key === 'Enter') moveLegacy()">
+                <button type="button" class="btn-modal-save" id="btnLegacy" onclick="moveLegacy()">Use this budget</button>
+            </div>
+        </section>
+
+        <section class="picker-card-box" id="listBox" hidden>
+            <h2>Open a budget</h2>
+            <div class="picker-list" id="pickerList"></div>
+        </section>
+
+        <section class="picker-card-box">
+            <h2>Start a new budget</h2>
+            <p id="newHint">Each budget has its own transactions, envelopes and income. Rules that everyone shares are available to every budget.</p>
+            <div class="picker-row">
+                <input type="text" id="newName" class="input-text" maxlength="40" placeholder="Name (e.g. Kendra)" onkeydown="if (event.key === 'Enter') createBudget()">
+                <input type="password" id="newPin" class="input-text picker-pin" autocomplete="new-password" placeholder="PIN (optional)" onkeydown="if (event.key === 'Enter') createBudget()">
+                <button type="button" class="btn-modal-save" id="btnCreate" onclick="createBudget()">Create</button>
+            </div>
+            <div class="picker-note">A PIN keeps others from opening your budget by accident. It doesn't encrypt your files.</div>
+        </section>
+    </main>
+
+    <script src="/web/js/lifecycle.js"></script>
+    <script src="/web/js/profile_picker.js"></script>
+</body>
+</html>

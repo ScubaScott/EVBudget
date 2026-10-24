@@ -1,5 +1,6 @@
 /* Import tab: pick bank files, review how each row was classified, then save. */
 
+let importAccountNames = [];      // card / account names already in use, offered when naming a file
 let importFiles = [];            // inspected files: {filename, headers, mapping, account_type, is_mapped, selected, imported_rows, ...}
 let importRecords = [];          // preview rows
 let importRenderLimit = 300;
@@ -52,6 +53,7 @@ async function importScanFolder() {
         }
         const inspected = await apiPost('/api/import/inspect', { filenames: scan.files.map(f => f.filename) });
         const meta = new Map(scan.files.map(f => [f.filename, f]));
+        importAccountNames = inspected.accounts || [];
         importFiles = inspected.files.map(info => {
             const old = previous.get(info.filename);
             const m = meta.get(info.filename) || {};
@@ -61,6 +63,7 @@ async function importScanFolder() {
             if (old) {
                 info.selected = old.selected;
                 info.account_type = old.account_type;
+                info.account_name = old.account_name;
                 info.mapping = old.mapping;
                 info.is_mapped = old.is_mapped;
             } else {
@@ -98,7 +101,7 @@ function renderImportFiles() {
     wrap.hidden = importFiles.length === 0;
     body.innerHTML = importFiles.map((f, i) => {
         if (!f.valid) {
-            return `<tr class="import-file-bad"><td></td><td>${escapeHtml(f.filename)}</td><td colspan="4">Can't read this file: ${escapeHtml(f.error || 'unknown problem')}</td></tr>`;
+            return `<tr class="import-file-bad"><td></td><td>${escapeHtml(f.filename)}</td><td colspan="5">Can't read this file: ${escapeHtml(f.error || 'unknown problem')}</td></tr>`;
         }
         const isPdf = f.kind === 'pdf';
         const mapped = isPdf
@@ -120,6 +123,8 @@ function renderImportFiles() {
             <td><div style="font-weight:500;">${escapeHtml(f.filename)}</div><div class="import-file-sub">${fileSub}</div>${warn}</td>
             <td style="white-space:nowrap;">${escapeHtml(formatDisplayDate(f.modified))}</td>
             <td>${imported}</td>
+            <td><input type="text" class="input-text import-mini" list="importAccountList" maxlength="60" placeholder="Card name"
+                       value="${escapeHtml(f.account_name || '')}" onchange="importFiles[${i}].account_name = this.value.trim()"></td>
             <td>
                 <select class="select-input import-mini" onchange="importFiles[${i}].account_type = this.value">
                     <option value="Bank / Checking" ${f.account_type === 'Bank / Checking' ? 'selected' : ''}>Bank / Checking</option>
@@ -129,6 +134,7 @@ function renderImportFiles() {
             <td>${mapped} ${editBtn}</td>
         </tr>`;
     }).join('');
+    document.getElementById('importAccountList').innerHTML = importAccountNames.map(n => `<option value="${escapeHtml(n)}">`).join('');
     updateImportSelectionHint();
 }
 
@@ -216,7 +222,8 @@ async function importProcess() {
     try {
         const data = await apiPost('/api/import/preview', {
             files: chosen.map(f => ({
-                filename: f.filename, mapping: f.mapping, account_type: f.account_type, headers: f.headers
+                filename: f.filename, mapping: f.mapping, account_type: f.account_type, headers: f.headers,
+                account_name: f.account_name, memory_key: f.memory_key
             }))
         });
         importRecords = data.records.map(r => Object.assign({ skip: false, restore: false }, r));
@@ -479,9 +486,10 @@ async function importSetEnvelope(idx, envelope) {
     if (r.txn_kind !== 'expense' || !envelope) return;
     const phrase = (r.name || '').replace(/CHECK #[0-9]+/g, '').trim();
     if (!phrase) return;
-    if (!confirm(`Always send "${phrase}" to "${envelope}" from now on?`)) return;
+    const scope = await askRuleScope(`Always send "${phrase}" to "${envelope}" from now on?`);
+    if (!scope) return;
     try {
-        await apiPost('/api/rules/save', { phrase, stage: 'envelope', set_envelope: envelope });
+        await apiPost('/api/rules/save', { phrase, stage: 'envelope', set_envelope: envelope, scope });
         let updated = 0;
         importRecords.forEach(o => {
             if (o.status === 'new' && !o.edited && o.txn_kind === 'expense' && (o.name || '').toUpperCase().includes(phrase.toUpperCase())) {
@@ -640,7 +648,7 @@ function renderImportRules() {
     document.getElementById('rulesBody').innerHTML = rows.length === 0
         ? '<tr><td colspan="5" class="import-more">No rules here yet.</td></tr>'
         : rows.slice(0, 400).map(r => `<tr class="${r.active ? '' : 'excluded-row'}">
-            <td>${r.description ? `<div class="rule-desc">${escapeHtml(r.description)}</div>` : ''}<code>${escapeHtml(r.phrase)}</code> <span class="rule-origin">${RULE_ORIGIN_LABELS[r.origin] || ''}</span></td>
+            <td>${r.description ? `<div class="rule-desc">${escapeHtml(r.description)}</div>` : ''}<code>${escapeHtml(r.phrase)}</code> <span class="rule-origin">${RULE_ORIGIN_LABELS[r.origin] || ''}</span><span class="rule-scope ${r.scope === 'shared' ? 'shared' : ''}">${r.scope === 'shared' ? 'Everyone' : 'Just me'}</span></td>
             <td>${escapeHtml(STAGE_LABELS[r.stage] || r.stage)}</td>
             <td>${escapeHtml(describeRule(r))}</td>
             <td style="text-align:center;"><input type="checkbox" class="txn-checkbox" ${r.active ? 'checked' : ''} onchange="toggleImportRule(${r.id}, this.checked)"></td>
@@ -718,6 +726,7 @@ function editImportRule(id) {
     document.getElementById('ruleNewRegex').checked = r.match_mode === 'regex';
     document.getElementById('ruleNewEnvelope').value = r.set_envelope || '';
     document.getElementById('ruleNewPayee').value = r.set_payee || '';
+    document.getElementById('ruleNewScope').value = r.scope || 'personal';
     onRuleActionChange();
     document.getElementById('btnRuleSave').textContent = 'Save changes';
     document.getElementById('btnRuleCancel').hidden = false;
@@ -729,6 +738,7 @@ function cancelRuleEdit() {
     editingRuleId = null;
     ['ruleNewDescription', 'ruleNewPhrase', 'ruleNewPayee'].forEach(id => { document.getElementById(id).value = ''; });
     document.getElementById('ruleNewRegex').checked = false;
+    document.getElementById('ruleNewScope').value = '';
     document.getElementById('ruleNewPreview').innerHTML = '';
     document.getElementById('btnRuleSave').textContent = 'Add rule';
     document.getElementById('btnRuleCancel').hidden = true;
@@ -742,13 +752,15 @@ async function addImportRule() {
     const envelope = document.getElementById('ruleNewEnvelope').value;
     const payee = document.getElementById('ruleNewPayee').value.trim();
     const orig = editingRuleId ? importRulesData.find(x => x.id === editingRuleId) : null;
+    const scope = document.getElementById('ruleNewScope').value;
     if (!phrase) { showToast('Enter the text to look for.', true); return; }
     if (['envelope', 'refund'].includes(action) && !envelope) { showToast('Choose an envelope.', true); return; }
     if (action === 'payee' && !payee) { showToast('Enter the new payee name.', true); return; }
+    if (!scope) { showToast('Choose who this rule applies to: just you, or everyone.', true); return; }
 
     // Matching mode: pattern if ticked; otherwise keep a whole-word or vendor-style match the form can't show
     const keepMode = orig && ['word', 'vendor'].includes(orig.match_mode) ? orig.match_mode : 'contains';
-    const body = Object.assign({ phrase, match_mode: document.getElementById('ruleNewRegex').checked ? 'regex' : keepMode,
+    const body = Object.assign({ phrase, scope, match_mode: document.getElementById('ruleNewRegex').checked ? 'regex' : keepMode,
         description: document.getElementById('ruleNewDescription').value.trim() }, ruleFieldsFor(action, envelope, payee, orig));
     if (orig) {
         body.id = orig.id;
