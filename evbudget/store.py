@@ -150,7 +150,7 @@ SCHEMA_STATEMENTS = [
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL UNIQUE COLLATE NOCASE,
         kind TEXT NOT NULL DEFAULT 'spending',
-        rollover_mode TEXT NOT NULL DEFAULT 'reset',
+        rollover_mode TEXT NOT NULL DEFAULT 'rollover',
         monthly_budget_cents INTEGER NOT NULL DEFAULT 0,
         goal_cents INTEGER,
         goal_date TEXT,
@@ -271,6 +271,8 @@ def create_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE rules ADD COLUMN description TEXT")
     for stmt in INDEX_STATEMENTS:
         conn.execute(stmt)
+    # Envelopes used to offer 'start fresh' (month-end leftovers swept to Unallocated). Leftovers now always stay put.
+    conn.execute("UPDATE envelopes SET rollover_mode = 'rollover' WHERE rollover_mode != 'rollover'")
     conn.commit()
 
 
@@ -323,7 +325,7 @@ def backup_db(db_path: str, backup_dir: Optional[str] = None, prefix: str = "bud
 def guess_envelope_kind(name: str) -> Dict[str, str]:
     """Starting kind and rollover mode for an envelope. Names say nothing about the type: everything starts as
     spending and the owner changes it in the envelope manager."""
-    return {"kind": "spending", "rollover_mode": "reset"}
+    return {"kind": "spending", "rollover_mode": "rollover"}
 
 
 def insert_rule(conn: sqlite3.Connection, rule: Dict[str, Any], shared: bool = False, table: str = "rules") -> int:

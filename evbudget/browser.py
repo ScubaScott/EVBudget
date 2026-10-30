@@ -14,7 +14,7 @@ import sys
 import webbrowser
 from typing import Callable, List, Mapping, Optional, Tuple
 
-WINDOW_SIZE = "1440,900"
+WINDOW_SIZE = "1620,1400"
 DISABLE_ENV = "EVBUDGET_NO_APP_WINDOW"
 
 Browser = Tuple[str, str]  # (name, path to the program)

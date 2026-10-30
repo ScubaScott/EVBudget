@@ -34,7 +34,6 @@ function showStopped() {
 }
 
 async function quitApp() {
-    if (!confirm('Stop EVBudget? Your data is already saved.')) return;
     try {
         await lifecyclePost('/api/shutdown');
     } catch (err) {

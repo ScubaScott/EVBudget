@@ -313,9 +313,13 @@ class App:
                 d["needs_review"] = int(d["needs_review"] or 0)
                 d["user_modified"] = int(d["user_modified"] or 0)
                 txns.append(d)
-            funded = {r[0] for r in conn.execute("SELECT income_txn_id FROM allocations WHERE status = 'confirmed' AND income_txn_id IS NOT NULL")}
+            allocated = {r[0]: int(r[1]) for r in conn.execute(
+                "SELECT income_txn_id, SUM(total_cents) FROM allocations WHERE status = 'confirmed' AND income_txn_id IS NOT NULL GROUP BY income_txn_id")}
             for d in txns:
-                d["funded"] = d["txn_id"] in funded
+                cents = allocated.get(d["txn_id"])
+                # funded = fully split; partial = some of it split, some still in Unallocated
+                d["funded"] = cents is not None and cents >= round(d["amount"] * 100)
+                d["partially_funded"] = cents is not None and not d["funded"]
             return {
                 "version": f"{VERSION:.1f}",
                 "go_live_date": store.get_setting(conn, "go_live_date") or None,

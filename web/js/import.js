@@ -850,7 +850,7 @@ async function runReclassifyPreview() {
                 const show = v => v === null || v === '' || v === undefined ? '(none)' : (f === 'txn_kind' ? (KIND_LABELS[v] || v) : f === 'person_id' ? (personName(v) || v) : f === 'is_included' || f === 'needs_review' ? (v ? 'yes' : 'no') : v);
                 return `<span class="diff-part"><b>${nice}:</b> ${escapeHtml(String(show(c.before[f])))} → ${escapeHtml(String(show(c.after[f])))}</span>`;
             }).join('');
-            return `<tr><td>${escapeHtml(formatDisplayDate(c.date))}</td><td>${escapeHtml(c.after.name)}</td><td class="amount-cell" style="text-align:right;">${formatSigned(c.amount)}</td><td>${parts}</td></tr>`;
+            return `<tr><td>${escapeHtml(formatDisplayDate(c.date))}</td><td>${escapeHtml(c.after.name)}<div class="import-file-sub">${escapeHtml(c.raw_name || '')}</div></td><td class="amount-cell" style="text-align:right;">${formatSigned(c.amount)}</td><td>${parts}</td><td>${escapeHtml(c.rule || '')}</td></tr>`;
         }).join('');
         apply.disabled = res.changed_count === 0;
     } catch (err) {

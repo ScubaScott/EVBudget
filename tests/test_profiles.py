@@ -312,7 +312,7 @@ class MissingEnvelopeTests(ProfileCase):
     def test_it_works_once_the_envelope_exists(self):
         self.add_rule(scope="shared", set_envelope="Boat Fuel")
         c = self.app.conn()
-        c.execute("INSERT INTO envelopes (name, kind, rollover_mode, sort_order) VALUES ('Boat Fuel', 'spending', 'reset', 99)")
+        c.execute("INSERT INTO envelopes (name, kind, rollover_mode, sort_order) VALUES ('Boat Fuel', 'spending', 'rollover', 99)")
         c.commit()
         c.close()
         out = self.classify()

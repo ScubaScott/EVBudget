@@ -133,6 +133,7 @@ class RuleSet:
         )
         self.known_envelopes = None if known_envelopes is None else {e.strip().lower() for e in known_envelopes}
         self.skipped: List[Dict[str, Any]] = []
+        self.last_match: Optional[Dict[str, Any]] = None  # the rule first() last returned, for explaining a result
 
     def _envelope_missing(self, rule: Dict[str, Any]) -> bool:
         env = (rule.get("set_envelope") or "").strip().lower()
@@ -156,6 +157,7 @@ class RuleSet:
                 if self._envelope_missing(rule):
                     self.skipped.append(rule)
                     continue
+                self.last_match = rule
                 return rule
         return None
 
@@ -174,6 +176,19 @@ class RuleSet:
 
 def _match_label(rule: Dict[str, Any]) -> str:
     return rule.get("label") or ORIGIN_LABELS.get(rule.get("origin") or "", "Core Rule")
+
+
+def rule_detail(rule: Optional[Dict[str, Any]]) -> str:
+    """Which rule decided a result, in words: its label, the phrase it looks for, and who it applies to."""
+    if not rule:
+        return ""
+    bits = [_match_label(rule)]
+    if rule.get("phrase"):
+        mode = "pattern" if (rule.get("match_mode") or "contains") == "regex" else "contains"
+        bits.append(f'{mode} "{rule["phrase"]}"')
+    if rule.get("scope"):
+        bits.append("everyone" if rule["scope"] == "shared" else "just me")
+    return " · ".join(bits)
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +289,9 @@ def classify(
 ) -> Dict[str, Any]:
     """Classify one transaction. Returns the fields the transactions table needs."""
     ctx.rules.skipped = []
+    ctx.rules.last_match = None
     out = _classify(ctx, raw_name, payee, amount, date_iso, check_num, trans_type)
+    out["match_detail"] = rule_detail(ctx.rules.last_match) or out["match_source"]
     if ctx.rules.skipped:
         missing = ctx.rules.skipped[0]["set_envelope"]
         out["needs_review"] = 1

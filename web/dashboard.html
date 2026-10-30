@@ -212,6 +212,13 @@
                             <button class="btn-refresh" onclick="openAllocModal(null)">Fund from Unallocated</button>
                         </div>
                     </div>
+                    <div class="env-timeline">
+                        <span class="env-timeline-edge" id="envTimelineStart"></span>
+                        <input type="range" id="envTimeline" min="-30" max="0" step="1" value="0" aria-label="Show envelope balances as of an earlier day" oninput="onEnvTimeline(this.value)">
+                        <span class="env-timeline-edge">Today</span>
+                        <span class="env-timeline-label" id="envTimelineLabel" aria-live="polite"></span>
+                        <button type="button" class="btn-refresh" id="envTimelineReset" onclick="resetEnvTimeline()" disabled>Back to today</button>
+                    </div>
                     <div id="envChart" class="env-chart"></div>
                 </section>
 
@@ -284,7 +291,6 @@
                             <tr>
                                 <th>Envelope</th>
                                 <th style="width: 135px;">Type</th>
-                                <th style="width: 135px;">Leftover</th>
                                 <th style="width: 150px;">Monthly budget</th>
                                 <th>Suggestion</th>
                                 <th style="width: 110px;">Bills</th>
@@ -626,6 +632,12 @@
         </section>
 
         <!-- Charts Row 1: Income vs Spend & Category Breakdown -->
+        <div style="display: flex; justify-content: flex-end; margin-bottom: 8px;">
+            <label style="display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; cursor: pointer;" title="Leave out bill envelopes (fixed costs) so the charts show spending you can change">
+                <input type="checkbox" id="chkHideBills" onchange="toggleHideBills(this.checked)">
+                Hide bills (show only spending I can control)
+            </label>
+        </div>
         <section class="charts-grid">
             <!-- Chart 1: Income vs Spend -->
             <div class="chart-card">
@@ -1383,6 +1395,7 @@
                     <button type="button" class="btn-bulk-action" id="btnAllocAdd" onclick="allocAddLine()">+ Add envelope</button>
                     <button type="button" class="btn-bulk-action" id="btnAllocTemplate" onclick="allocApplyTemplate()" hidden>Apply template</button>
                     <button type="button" class="btn-bulk-action" onclick="allocSuggest()">Suggest</button>
+                    <button type="button" class="btn-bulk-action" onclick="allocBalance()" title="Add or remove the difference evenly across these envelopes so nothing is left over or short">Balance to zero</button>
                 </div>
                 <div class="go-live-total" id="allocTotals"></div>
             </div>
@@ -1839,6 +1852,7 @@
                                 <th>Payee</th>
                                 <th style="width: 100px; text-align: right;">Amount</th>
                                 <th>What would change</th>
+                                <th style="width: 220px;">Because of rule</th>
                             </tr>
                         </thead>
                         <tbody id="reclassifyBody"></tbody>

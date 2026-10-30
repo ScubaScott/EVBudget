@@ -70,6 +70,7 @@ def reclassify(
             changes.append({
                 "txn_id": row["txn_id"], "date": row["date"], "raw_name": row["raw_name"], "amount": float(row["amount"]),
                 "before": before, "after": after, "changed_fields": changed,
+                "rule": res.get("match_detail") or after["match_source"],
             })
 
     if apply and changes:

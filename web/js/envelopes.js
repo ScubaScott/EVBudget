@@ -43,11 +43,73 @@ function renderEnvelopesTab() {
     document.getElementById('envLive').hidden = !live;
     if (!live) return;
     renderEnvWarnings();
-    renderEnvSummary();
-    renderEnvChart();
+    renderEnvTimeline();
     renderEnvQueue();
     renderEnvUpcoming();
     if (drawerEnvId) renderEnvDrawer();
+}
+
+// ---------------------------------------------------------------------
+// Time slider: show balances as of an earlier day (the summary cards and bars only; the rest stays live)
+// ---------------------------------------------------------------------
+const TIMELINE_DAYS = 30;
+let envDaysBack = 0;       // 0 = today
+let envHistSeq = 0;        // guards against out-of-order responses while dragging
+
+function envTimelineDate(daysBack) {
+    const d = new Date();
+    d.setDate(d.getDate() - daysBack);
+    return toInputDateFormat(d);
+}
+
+// Never offer days before go-live: there is nothing to show there
+function envTimelineSpan() {
+    const gl = envState && envState.go_live_date ? new Date(envState.go_live_date + 'T00:00:00') : null;
+    if (!gl) return TIMELINE_DAYS;
+    const sinceGoLive = Math.floor((Date.now() - gl.getTime()) / 86400000);
+    return Math.max(0, Math.min(TIMELINE_DAYS, sinceGoLive));
+}
+
+function renderEnvTimeline() {
+    const span = envTimelineSpan();
+    envDaysBack = Math.min(envDaysBack, span);
+    const slider = document.getElementById('envTimeline');
+    slider.min = -span;
+    slider.disabled = span === 0;
+    slider.value = -envDaysBack;
+    document.getElementById('envTimelineStart').textContent = span ? formatDisplayDate(envTimelineDate(span)).slice(0, 5) : '';
+    updateEnvTimeline();
+}
+
+function onEnvTimeline(v) {
+    envDaysBack = -parseInt(v, 10);
+    updateEnvTimeline();
+}
+
+function resetEnvTimeline() {
+    envDaysBack = 0;
+    document.getElementById('envTimeline').value = 0;
+    updateEnvTimeline();
+}
+
+async function updateEnvTimeline() {
+    const seq = ++envHistSeq;
+    const back = envDaysBack;
+    document.getElementById('envTimelineReset').disabled = back === 0;
+    document.getElementById('envTimelineLabel').textContent = back === 0 ? 'Today'
+        : `${formatDisplayDate(envTimelineDate(back))} (${back} day${back === 1 ? '' : 's'} ago)`;
+    if (back === 0) { drawEnvBalances(envState); return; }
+    try {
+        const hist = await api('/api/envelopes/balances?as_of=' + envTimelineDate(back));
+        if (seq === envHistSeq) drawEnvBalances(hist);
+    } catch (err) {
+        if (seq === envHistSeq) showToast('Could not load that day: ' + err.message, true);
+    }
+}
+
+function drawEnvBalances(state) {
+    renderEnvSummary(state, state !== envState);
+    renderEnvChart(state);
 }
 
 function renderEnvWarnings() {
@@ -71,27 +133,28 @@ function exportEnvelopeCsv() {
     if (drawerEnvId) window.location.href = '/api/envelopes/ledger.csv?envelope_id=' + drawerEnvId;
 }
 
-function renderEnvSummary() {
-    const s = envState;
+function renderEnvSummary(s = envState, historical = false) {
+    // Queue and bills-due counts only exist for today, and the Unallocated card opens a live screen
     const card = (cls, title, value, sub, attrs = '') => `<div class="kpi-card ${cls}" ${attrs}><div class="kpi-header"><span class="kpi-title">${title}</span></div>
         <div class="kpi-value ${cls}">${value}</div><div class="kpi-subtitle">${sub}</div></div>`;
     document.getElementById('envSummary').innerHTML =
         card(s.over_allocated ? 'spend' : 'net', 'Unallocated', m$(s.unallocated),
-            (s.over_allocated ? 'Over-allocated: more has been assigned than you have' : 'Income not yet put in an envelope') + ' &bull; click to fill',
-            'role="button" tabindex="0" style="cursor:pointer" onclick="openUnallocModal()" onkeydown="if (event.key === \'Enter\') openUnallocModal()"') +
+            (s.over_allocated ? 'Over-allocated: more has been assigned than you have' : 'Income not yet put in an envelope') + (historical ? '' : ' &bull; click to fill'),
+            historical ? '' : 'role="button" tabindex="0" style="cursor:pointer" onclick="openUnallocModal()" onkeydown="if (event.key === \'Enter\') openUnallocModal()"') +
         card(s.total_in_envelopes < 0 ? 'spend' : 'income', 'In envelopes', m$(s.total_in_envelopes), 'Across all active envelopes') +
-        card('count', 'To fill', String(s.queue_count), 'Deposits waiting to be split') +
+        (historical ? '' : card('count', 'To fill', String(s.queue_count), 'Deposits waiting to be split')) +
         card(s.overdrawn_count ? 'spend' : 'count', 'Overdrawn', String(s.overdrawn_count), 'Envelopes below zero') +
-        card('count', 'Bills due soon', String(s.bills_due_soon), 'Due in the next 7 days or overdue');
+        (historical ? '' : card('count', 'Bills due soon', String(s.bills_due_soon), 'Due in the next 7 days or overdue'));
     const warn = document.getElementById('envInvariant');
     warn.hidden = !s.invariant || s.invariant.ok;
     if (!warn.hidden) warn.textContent = 'Balances do not add up to opening money + income − spending. Please report this.';
 }
 
-function pctOf(value, cap) { return cap > 0 ? Math.max(0, value / cap) : 0; }
+// With no positive target (a carried-in deficit), any money in the envelope is more than it needs: a full bar.
+function pctOf(value, cap) { return cap > 0 ? Math.max(0, value / cap) : (value > 0 ? 1 : 0); }
 
-function renderEnvChart() {
-    const envs = envState.envelopes.filter(e => e.active);
+function renderEnvChart(state = envState) {
+    const envs = state.envelopes.filter(e => e.active);
     const anyNeg = envs.some(e => e.balance < 0);
     const neg = anyNeg ? 12 : 0;        // width of the left-hand "overdrawn" zone, in % of the track
     const pos = 100 - neg;
@@ -103,7 +166,7 @@ function renderEnvChart() {
         rows.forEach(e => {
             const frac = pctOf(e.balance, e.capacity);
             const fillW = Math.min(1, frac) * pos;
-            const over = frac > 1.0001;
+            const over = frac > 1.0001 || (e.capacity <= 0 && e.balance > 0);
             const negW = e.balance < 0 ? Math.min(1, Math.abs(e.balance) / Math.max(e.capacity, Math.abs(e.balance), 1)) * neg : 0;
             const markerLeft = e.marker !== null && e.capacity > 0 ? neg + Math.min(1, Math.max(0, e.marker / e.capacity)) * pos : null;
             const tip = [
@@ -135,8 +198,14 @@ function renderEnvQueue() {
             <td style="white-space:nowrap;">${escapeHtml(formatDisplayDate(q.date))}</td>
             <td><div style="font-weight:500;">${escapeHtml(q.person_name || q.name)}${q.source_name ? ' &middot; ' + escapeHtml(q.source_name) : ''}</div>
                 <div class="import-file-sub">${q.txn_kind === 'paycheck' ? (q.income_subtype === 'bonus' ? 'Bonus' : 'Paycheck') : 'Other income' + (q.income_label ? ' · ' + escapeHtml(q.income_label) : '')}</div></td>
-            <td class="amount-cell amount-income">${formatSigned(q.amount)}</td>
-            <td style="text-align:right;"><button type="button" class="btn-modal-save" onclick="openAllocModal('${escapeHtml(q.txn_id)}')">Allocate</button></td></tr>`).join('');
+            <td class="amount-cell amount-income">${queueAmountMarkup(q)}</td>
+            <td style="text-align:right;"><button type="button" class="btn-modal-save" onclick="openAllocModal('${escapeHtml(q.txn_id)}')">${q.partial ? 'Finish' : 'Allocate'}</button></td></tr>`).join('');
+}
+
+// A deposit's amount, plus how much of it is still unassigned when only part has been split
+function queueAmountMarkup(q) {
+    return formatSigned(q.amount) + (q.partial
+        ? `<div class="import-file-sub"><span class="kind-badge kind-review">Partially funded</span> ${m$(q.remaining)} left of ${m$(q.amount)}</div>` : '');
 }
 
 function renderEnvUpcoming() {
@@ -203,7 +272,7 @@ function closeUnallocModal() {
 }
 
 function renderUnallocModal() {
-    const total = envQueue.reduce((sum, q) => sum + q.amount, 0);
+    const total = envQueue.reduce((sum, q) => sum + q.remaining, 0);
     document.getElementById('unallocSummary').innerHTML =
         `<strong>${m$(envState.unallocated)}</strong> is in Unallocated. ` +
         (envQueue.length ? `${envQueue.length} deposit${envQueue.length === 1 ? '' : 's'} (${m$(total)}) still need to be split across envelopes.` : 'Every deposit has been split.') +
@@ -214,8 +283,8 @@ function renderUnallocModal() {
             <td style="white-space:nowrap;">${escapeHtml(formatDisplayDate(q.date))}</td>
             <td><div style="font-weight:500;">${escapeHtml(q.person_name || q.name)}${q.source_name ? ' &middot; ' + escapeHtml(q.source_name) : ''}</div>
                 <div class="import-file-sub">${q.txn_kind === 'paycheck' ? (q.income_subtype === 'bonus' ? 'Bonus' : 'Paycheck') : 'Other income' + (q.income_label ? ' · ' + escapeHtml(q.income_label) : '')}</div></td>
-            <td class="amount-cell amount-income">${formatSigned(q.amount)}</td>
-            <td style="text-align:right;"><button type="button" class="btn-modal-save" onclick="allocateFromUnalloc('${escapeHtml(q.txn_id)}')">Allocate</button></td></tr>`).join('');
+            <td class="amount-cell amount-income">${queueAmountMarkup(q)}</td>
+            <td style="text-align:right;"><button type="button" class="btn-modal-save" onclick="allocateFromUnalloc('${escapeHtml(q.txn_id)}')">${q.partial ? 'Finish' : 'Allocate'}</button></td></tr>`).join('');
 }
 
 function allocateFromUnalloc(txnId) {
@@ -290,6 +359,43 @@ function allocAddLine() {
 
 function allocApplyTemplate() {
     allocCtx.lines = allocCtx.templateLines.map(l => Object.assign({}, l));
+    renderAllocModal();
+}
+
+// Spreads whatever is left (or over) evenly across the lines so Allocated lands exactly on the deposit.
+// Works in whole cents. Odd cents favor the envelope with the biggest shortfall: when adding, the most short
+// get them first; when removing, the least short give them up first. Removing never takes a line below zero.
+function allocBalance() {
+    const lines = allocCtx.lines;
+    if (!lines.length) { showToast('Add an envelope first.'); return; }
+    const cents = lines.map(l => Math.round((parseFloat(l.amount) || 0) * 100));
+    const shortfall = lines.map(l => {
+        const e = allocCtx.envs.find(x => x.id === l.envelope_id);
+        return e && typeof e.gap === 'number' ? e.gap : -Infinity;
+    });
+    const neediest = lines.map((l, i) => i).sort((a, b) => shortfall[b] - shortfall[a]);
+    let diff = Math.round(allocAvailable() * 100) - cents.reduce((s, c) => s + c, 0);
+    if (diff === 0) { showToast('Already balanced.'); return; }
+    if (diff > 0) {
+        const q = Math.floor(diff / cents.length), r = diff % cents.length;
+        cents.forEach((c, i) => { cents[i] = c + q; });
+        neediest.slice(0, r).forEach(i => { cents[i] += 1; });
+        diff = 0;
+    } else {
+        let need = -diff;
+        while (need > 0) {
+            const live = neediest.slice().reverse().filter(i => cents[i] > 0);
+            if (!live.length) break;
+            const share = Math.floor(need / live.length);
+            if (share === 0) {
+                live.slice(0, need).forEach(i => { cents[i] -= 1; });
+                need = 0;
+            } else {
+                live.forEach(i => { const take = Math.min(share, cents[i]); cents[i] -= take; need -= take; });
+            }
+        }
+    }
+    lines.forEach((l, i) => { l.amount = cents[i] / 100; });
     renderAllocModal();
 }
 
@@ -384,7 +490,7 @@ async function renderEnvDrawer() {
     if (!e) { closeEnvDrawer(); return; }
     document.getElementById('drawerTitle').textContent = e.name;
     document.getElementById('drawerSub').innerHTML =
-        `${KIND_OPTIONS_LABEL[e.kind]} &middot; ${e.rollover_mode === 'rollover' ? 'carries leftovers over' : 'starts fresh each month'} &middot; budget ${m$(e.budget)} a month`;
+        `${KIND_OPTIONS_LABEL[e.kind]} &middot; budget ${m$(e.budget)} a month`;
     document.getElementById('drawerFacts').innerHTML = [
         ['Balance', m$(e.balance)], ['Target', e.marker === null ? '—' : m$(e.marker)], ['Full at', m$(e.capacity)],
         ['Status', `<span class="env-chip st-${e.status}">${STATUS_LABELS[e.status]}</span>`]

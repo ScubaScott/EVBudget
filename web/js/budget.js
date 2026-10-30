@@ -9,7 +9,6 @@ let billsEnvelopeId = null;
 let budgetLoaded = false;
 
 const KIND_OPTIONS = { spending: 'Spending', bill: 'Bills', savings: 'Savings' };
-const ROLLOVER_OPTIONS = { reset: 'Start fresh', rollover: 'Carry over' };
 
 document.addEventListener('tabchange', (e) => {
     if (e.detail.tab === 'budget') loadBudget();
@@ -111,7 +110,6 @@ function renderBudgetTable() {
         return `<tr class="${e.active ? '' : 'excluded-row'}">
             <td><div style="font-weight:600;">${escapeHtml(e.name)}</div></td>
             <td>${sel(KIND_OPTIONS, e.kind, 'kind', e.id)}</td>
-            <td>${sel(ROLLOVER_OPTIONS, e.rollover_mode, 'rollover_mode', e.id)}</td>
             <td>${budgetCell}</td>
             <td>${suggestionCell(e)}</td>
             <td><button type="button" class="btn-inline-action btn-inline-cancel" onclick="openBillsModal(${e.id})">${activeBills ? activeBills + ' bill' + (activeBills === 1 ? '' : 's') : 'Add bills'}</button>${overdue ? ' <span class="kind-badge kind-review">Overdue</span>' : ''}</td>

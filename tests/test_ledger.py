@@ -2,7 +2,7 @@ import unittest
 from datetime import date
 
 from helpers import TempAppCase
-from evbudget import billmatch, import_engine, ledger
+from evbudget import billmatch, import_engine, ledger, store
 from evbudget.http_util import HttpError
 
 D = date
@@ -148,15 +148,25 @@ class FillTests(LedgerCase):
         self.assertEqual({n: self.bal(D(2026, 10, 20), n) for n in before}, before)
         self.invariant(D(2026, 10, 20))
 
-    def test_queue_lists_unfunded_deposits_only(self):
+    def test_queue_lists_deposits_that_are_not_fully_funded(self):
         self.start({})
-        a, b = self.pay("2026-10-09", 3500), self.pay("2026-10-23", 3500)
+        a, b, full = self.pay("2026-10-09", 3500), self.pay("2026-10-23", 3500), self.pay("2026-10-16", 1000)
         self.add_txn(date="2026-09-25", amount=3500, envelope="", txn_kind="paycheck", income_source_id=1)  # before go-live
         self.confirm([{"envelope_id": self.eid("Groceries"), "amount": 100}], txn=a, as_of=D(2026, 10, 25))
+        self.confirm([{"envelope_id": self.eid("Groceries"), "amount": 1000}], txn=full, as_of=D(2026, 10, 25))
         c = self.conn()
         queue = ledger.fill_queue(c)
         c.close()
-        self.assertEqual([q["txn_id"] for q in queue], [b])
+        self.assertEqual([q["txn_id"] for q in queue], [b, a])
+        self.assertEqual((queue[1]["partial"], queue[1]["remaining"]), (True, 3400.0))
+        self.assertFalse(queue[0]["partial"])
+
+    def test_partial_flag_in_transactions_payload(self):
+        self.start({})
+        t = self.pay("2026-10-09", 1000)
+        self.confirm([{"envelope_id": self.eid("Groceries"), "amount": 100}], txn=t)
+        x = [x for x in self.call(self.app.get_transactions, method="GET")["transactions"] if x["txn_id"] == t][0]
+        self.assertEqual((x["funded"], x["partially_funded"]), (False, True))
 
     def test_cannot_allocate_more_than_is_in_unallocated(self):
         self.start({})
@@ -230,72 +240,78 @@ class GuardTests(LedgerCase):
     def test_funded_flag_in_transactions_payload(self):
         self.start({})
         t = self.pay("2026-10-09", 1000)
-        self.confirm([{"envelope_id": self.eid("Groceries"), "amount": 100}], txn=t)
+        self.confirm([{"envelope_id": self.eid("Groceries"), "amount": 1000}], txn=t)
         data = self.call(self.app.get_transactions, method="GET")
         self.assertEqual(data["go_live_date"], self.GO_LIVE)
         self.assertTrue([x for x in data["transactions"] if x["txn_id"] == t][0]["funded"])
 
 
-class SweepTests(LedgerCase):
-    def test_reset_envelopes_hand_leftovers_back_and_rollover_ones_keep_them(self):
+class LeftoverTests(LedgerCase):
+    def test_leftovers_stay_in_their_envelope_across_months(self):
         self.start({"Groceries": 120, "Insurance: Auto": 500, "Gas": 30}, go_live="2026-10-01")
-        self.call(self.app.save_envelope_settings, {"id": self.eid("Groceries"), "rollover_mode": "reset"})
-        self.call(self.app.save_envelope_settings, {"id": self.eid("Gas"), "rollover_mode": "reset"})
         self.add_txn(date="2026-10-10", amount=-50, envelope="Groceries")
-        self.add_txn(date="2026-10-11", amount=-60, envelope="Gas")  # overspent: carries forward as a negative
-        _, by = self.states(D(2026, 11, 5))
-        self.assertEqual(by["Groceries"]["balance"], 0.0)          # 70 left over was swept
+        self.add_txn(date="2026-10-11", amount=-60, envelope="Gas")
+        data, by = self.states(D(2026, 11, 5))
+        self.assertEqual(by["Groceries"]["balance"], 70.0)
         self.assertEqual(by["Gas"]["balance"], -30.0)
         self.assertEqual(by["Insurance: Auto"]["balance"], 500.0)
-        data, _ = self.states(D(2026, 11, 5))
-        self.assertEqual(data["unallocated"], 70.0)
+        self.assertEqual(data["unallocated"], 0.0)
         self.invariant(D(2026, 11, 5))
 
-    def test_sweeps_run_once_and_only_for_finished_months(self):
-        self.start({"Groceries": 100}, go_live="2026-10-01")
-        self.call(self.app.save_envelope_settings, {"id": self.eid("Groceries"), "rollover_mode": "reset"})
+    def test_no_month_end_moves_are_ever_created(self):
+        self.start({"Groceries": 100}, go_live="2026-09-01")
+        self.assertEqual(self.bal(D(2026, 12, 20), "Unallocated"), 0.0)
         c = self.conn()
-        self.assertEqual(ledger.ensure_sweeps(c, D(2026, 10, 30)), 0)   # October not over
-        self.assertEqual(ledger.ensure_sweeps(c, D(2026, 11, 2)), 1)
-        self.assertEqual(ledger.ensure_sweeps(c, D(2026, 11, 3)), 0)    # already done
         n = c.execute("SELECT COUNT(*) FROM envelope_moves WHERE move_type = 'sweep'").fetchone()[0]
         c.close()
-        self.assertEqual(n, 1)
-        self.add_txn(date="2026-10-05", amount=-1, envelope="Groceries")  # late edit does not rewrite the past
-        self.assertEqual(self.bal(D(2026, 11, 20), "Unallocated"), 100.0)
+        self.assertEqual(n, 0)
 
-    def test_several_months_catch_up_and_rerunning_setup_clears_sweeps(self):
+    def test_old_start_fresh_envelopes_are_switched_to_carry_over(self):
         self.start({"Groceries": 100}, go_live="2026-09-01")
-        self.call(self.app.save_envelope_settings, {"id": self.eid("Groceries"), "rollover_mode": "reset"})
-        self.assertEqual(self.bal(D(2026, 11, 20), "Unallocated"), 100.0)  # swept once in Oct, nothing left for Nov
-        self.call(self.app.setup_go_live, {"date": "2026-09-01", "opening": {str(self.eid("Groceries")): 40}, "reset": True})
-        self.assertEqual(self.bal(D(2026, 9, 20), "Groceries"), 40.0)
+        c = self.conn()
+        c.execute("UPDATE envelopes SET rollover_mode = 'reset' WHERE name = 'Groceries'")
+        c.commit()
+        store.create_schema(c)
+        mode = c.execute("SELECT rollover_mode FROM envelopes WHERE name = 'Groceries'").fetchone()[0]
+        c.close()
+        self.assertEqual(mode, "rollover")
+
+    def test_earlier_sweeps_still_count_and_are_left_alone(self):
+        self.start({"Groceries": 100}, go_live="2026-09-01")
+        c = self.conn()
+        c.execute("""INSERT INTO envelope_moves (date, from_envelope_id, to_envelope_id, amount_cents, move_type, period_key, note, created_at)
+                     VALUES ('2026-10-01', ?, ?, 4000, 'sweep', '2026-09', 'Month-end leftover', '2026-10-01T00:00:00')""",
+                  (self.eid("Groceries"), self.eid("Unallocated")))
+        c.commit()
+        c.close()
+        self.assertEqual(self.bal(D(2026, 11, 20), "Groceries"), 60.0)
+        self.assertEqual(self.bal(D(2026, 11, 20), "Unallocated"), 40.0)
+        self.add_txn(date="2026-09-05", amount=-1, envelope="Groceries")   # editing the past does not rewrite it
         self.assertEqual(self.bal(D(2026, 11, 20), "Unallocated"), 40.0)
 
 
 class BackdatedFillTests(LedgerCase):
     def test_filling_old_paychecks_after_a_backdated_go_live_gives_the_right_leftovers(self):
         self.start({}, go_live="2026-01-01")                       # backdated to the start of the year
-        self.call(self.app.save_envelope_settings, {"id": self.eid("Groceries"), "rollover_mode": "reset"})
         jan, feb = self.pay("2026-01-09", 3000), self.pay("2026-02-06", 3000)
         self.add_txn(date="2026-01-20", amount=-400, envelope="Groceries")
         self.add_txn(date="2026-02-20", amount=-500, envelope="Groceries")
-        # Looking at balances first triggers month-end sweeps, before any fills exist.
+        # Looking at balances before any fills exist must not change what the fills give later.
         before = self.bal(D(2026, 4, 15), "Groceries")
         self.assertEqual(before, -900.0)
         g = [{"envelope_id": self.eid("Groceries"), "amount": 600}]
         self.confirm(g, txn=jan, as_of=D(2026, 4, 15))
         self.confirm(g, txn=feb, as_of=D(2026, 4, 15))
-        # Jan: 600 - 400 = 200 left, swept on Feb 1. Feb: 600 - 500 = 100 left, swept on Mar 1.
-        self.assertEqual(self.bal(D(2026, 4, 15), "Groceries"), 0.0)
-        self.assertEqual(self.bal(D(2026, 4, 15), "Unallocated"), 6000 - 1200 + 300)
+        # Jan: 600 - 400 = 200 left. Feb: 600 - 500 = 100 left. Both stay in Groceries.
+        self.assertEqual(self.bal(D(2026, 4, 15), "Groceries"), 300.0)
+        self.assertEqual(self.bal(D(2026, 4, 15), "Unallocated"), 6000 - 1200)
         self.invariant(D(2026, 4, 15))
-        # Undoing a January fill rewinds the sweeps again.
+        # Undoing a January fill takes its 600 back out.
         c = self.conn()
         alloc = c.execute("SELECT id FROM allocations WHERE status = 'confirmed' ORDER BY id").fetchone()[0]
         c.close()
         self.call(self.app.allocation_void, {"allocation_id": alloc})
-        self.assertEqual(self.bal(D(2026, 4, 15), "Groceries"), -300.0)  # Jan's -400 carries into Feb: -400 + 600 - 500
+        self.assertEqual(self.bal(D(2026, 4, 15), "Groceries"), -300.0)  # -400 + 600 - 500
         self.invariant(D(2026, 4, 15))
 
 
@@ -483,7 +499,7 @@ class BalancesEndpointTests(LedgerCase):
         data = self.call(self.app.envelope_balances, query={"as_of": "2026-10-25"}, method="GET")
         self.assertTrue(data["enabled"])
         self.assertTrue(data["invariant"]["ok"])
-        self.assertEqual(data["queue_count"], 0)
+        self.assertEqual(data["queue_count"], 2)  # both deposits are only partly split
         self.assertEqual(data["total_in_envelopes"], round(sum(e["balance"] for e in data["envelopes"]), 2))
 
 

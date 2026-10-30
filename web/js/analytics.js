@@ -56,6 +56,8 @@ let breakdownMode = "category"; // 'category' | 'payee'
 let drilldownCategory = null;   // null for all categories, or specific envelope name
 let spendingStackMode = "total"; // 'total' | 'stacked' | 'percent'
 
+let hideBillEnvelopes = false;  // charts only: drop fixed-cost bill envelopes to focus on controllable spending
+
 // Shared color palette for consistent category colors across all charts
 const COLOR_PALETTE = [
     '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899',
@@ -98,7 +100,26 @@ function netSpendAmount(txn) {
 
 document.addEventListener('themechange', updateChartThemeStyles);
 
+// The transactions the spending charts draw from. With the bills toggle on, bill envelopes are left out.
+function chartTransactions() {
+    if (!hideBillEnvelopes) return filteredTransactions;
+    return filteredTransactions.filter(txn => {
+        const info = txn.envelope && envelopeKinds[txn.envelope.trim()];
+        return !(info && info.kind === 'bill');
+    });
+}
+
+function toggleHideBills(checked) {
+    hideBillEnvelopes = checked;
+    updateCharts();
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+    // Envelope kinds are needed up front so the bills toggle knows which envelopes are bills
+    api('/api/envelopes').then(r => {
+        envelopeKinds = r.kinds || {};
+        if (hideBillEnvelopes) updateCharts();
+    }).catch(() => { /* the toggle just has no effect without it */ });
     reloadTransactionData();
     setupScrollListener();
     setupKeyboardShortcuts();
@@ -662,7 +683,7 @@ function updateIncomeVsSpendChart() {
     let totalIncome = 0.0;
     let totalSpend = 0.0;
 
-    filteredTransactions.forEach(txn => {
+    chartTransactions().forEach(txn => {
         if (isIncomeKind(txn)) totalIncome += txn.amount;
         totalSpend += netSpendAmount(txn);
     });
@@ -770,7 +791,7 @@ function updateCategorySpendChart() {
         subtitleEl.textContent = `Top payees in ${drilldownCategory} • Click slice to filter`;
         backBtn.style.display = 'inline-flex';
 
-        filteredTransactions.forEach(txn => {
+        chartTransactions().forEach(txn => {
             if (txn.envelope === drilldownCategory) {
                 const spend = netSpendAmount(txn);
                 if (spend !== 0) {
@@ -785,7 +806,7 @@ function updateCategorySpendChart() {
         subtitleEl.textContent = 'Top 10 payees by total spend • Click to filter';
         backBtn.style.display = 'none';
 
-        filteredTransactions.forEach(txn => {
+        chartTransactions().forEach(txn => {
             const spend = netSpendAmount(txn);
             if (spend !== 0) {
                 const payee = (txn.name && txn.name.trim().length > 0) ? txn.name.trim() : 'Unknown Payee';
@@ -798,7 +819,7 @@ function updateCategorySpendChart() {
         subtitleEl.textContent = 'Expense distribution • Click slice to drill down into payees';
         backBtn.style.display = 'none';
 
-        filteredTransactions.forEach(txn => {
+        chartTransactions().forEach(txn => {
             const spend = netSpendAmount(txn);
             if (spend !== 0) {
                 const envelope = txn.envelope && txn.envelope.trim().length > 0 ? txn.envelope.trim() : 'Unallocated';
@@ -929,7 +950,7 @@ function updateSpendingOverTimeChart() {
     const timeBuckets = {};
     const activeEnvelopesInTimeframe = new Set();
 
-    filteredTransactions.forEach(txn => {
+    chartTransactions().forEach(txn => {
         const hasEnvelope = txn.envelope && txn.envelope.trim().length > 0;
         const netSpend = netSpendAmount(txn);
 
@@ -1301,6 +1322,9 @@ function isFillable(txn) {
 function fillBadgeMarkup(txn) {
     if (!isFillable(txn)) return '';
     const id = escapeHtml(txn.txn_id);
+    if (txn.partially_funded) {
+        return `<button type="button" class="kind-badge kind-review kind-link" title="Only part of this deposit has been split across envelopes" onclick="event.stopPropagation(); openAllocModal('${id}')">Partially funded &rsaquo;</button>`;
+    }
     return txn.funded
         ? `<button type="button" class="kind-badge kind-refund kind-link" title="View or edit how this deposit was split across envelopes" onclick="event.stopPropagation(); openAllocModal('${id}')">Funded &rsaquo;</button>`
         : `<button type="button" class="kind-badge kind-review kind-link" title="Split this deposit across envelopes" onclick="event.stopPropagation(); openAllocModal('${id}')">To fill &rsaquo;</button>`;
@@ -1312,9 +1336,12 @@ function refreshEditFill(txn) {
     const show = isFillable(txn);
     wrap.style.display = show ? '' : 'none';
     if (!show) return;
+    const touched = txn.funded || txn.partially_funded;
     document.getElementById('editFillInfo').textContent = txn.funded
-        ? 'This deposit has been split across envelopes.' : 'This deposit has not been split across envelopes yet.';
-    document.getElementById('editFillBtn').textContent = txn.funded ? 'View or edit fill\u2026' : 'Fill envelopes\u2026';
+        ? 'This deposit has been split across envelopes.'
+        : txn.partially_funded ? 'Only part of this deposit has been split across envelopes.'
+        : 'This deposit has not been split across envelopes yet.';
+    document.getElementById('editFillBtn').textContent = touched ? 'View or edit fill\u2026' : 'Fill envelopes\u2026';
 }
 
 function openFillFromEditModal() {
@@ -2285,6 +2312,7 @@ async function setEnvelopeKind(name, kind) {
     try {
         await apiPost('/api/envelopes/save', { id: info.id, kind });
         info.kind = kind;
+        if (hideBillEnvelopes) updateCharts();
         showToast(`"${name}" is now a ${{ spending: 'spending', bill: 'bills', savings: 'savings' }[kind]} envelope.`);
     } catch (err) {
         showToast(err.message, true);

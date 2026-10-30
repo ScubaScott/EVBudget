@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional
 from . import recurrence, store
 
 KINDS = ("spending", "bill", "savings")
-ROLLOVER_MODES = ("rollover", "reset")
 AMOUNT_MODES = ("fixed", "estimated")
 
 
@@ -295,11 +294,8 @@ def save_envelope(conn: Any, data: Dict[str, Any]) -> None:
     if env is None or env["kind"] == "system":
         raise ValidationError("Envelope not found")
     kind = data.get("kind", env["kind"])
-    mode = data.get("rollover_mode", env["rollover_mode"])
     if kind not in KINDS:
         raise ValidationError("Unknown envelope kind")
-    if mode not in ROLLOVER_MODES:
-        raise ValidationError("Unknown rollover setting")
     budget = to_cents(data["monthly_budget"]) if "monthly_budget" in data else env["monthly_budget_cents"]
     if budget < 0:
         raise ValidationError("A budget can't be negative")
@@ -313,8 +309,8 @@ def save_envelope(conn: Any, data: Dict[str, Any]) -> None:
             raise ValidationError("The goal date must be a real date (YYYY-MM-DD)")
     active = env["active"] if "active" not in data else (0 if data["active"] in (0, False) else 1)
     conn.execute(
-        "UPDATE envelopes SET kind=?, rollover_mode=?, monthly_budget_cents=?, goal_cents=?, goal_date=?, active=? WHERE id=?",
-        (kind, mode, budget, goal, goal_date, active, env["id"]),
+        "UPDATE envelopes SET kind=?, monthly_budget_cents=?, goal_cents=?, goal_date=?, active=? WHERE id=?",
+        (kind, budget, goal, goal_date, active, env["id"]),
     )
 
 
@@ -370,7 +366,6 @@ def go_live(conn: Any, date_iso: str, opening: Dict[str, Any], reset: bool = Fal
                 """UPDATE allocations SET status = 'voided', voided_at = ?, voided_income_txn_id = income_txn_id, income_txn_id = NULL
                    WHERE status = 'confirmed' AND NOT EXISTS
                      (SELECT 1 FROM envelope_moves m WHERE m.allocation_id = allocations.id AND m.voided_at IS NULL)""", (now,))
-            store.set_setting(conn, "sweeps_through", "")
         for env_id, cents in parsed.items():
             conn.execute(
                 """INSERT INTO envelope_moves (date, from_envelope_id, to_envelope_id, amount_cents, move_type, note, created_at)

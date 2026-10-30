@@ -104,12 +104,12 @@ class BillTests(BudgetCase):
 class EnvelopeSettingsTests(BudgetCase):
     def test_save_and_validate(self):
         gid = self.env_id("Groceries")
-        self.call(self.app.save_envelope_settings, {"id": gid, "monthly_budget": 650.5, "rollover_mode": "rollover", "kind": "spending"})
+        self.call(self.app.save_envelope_settings, {"id": gid, "monthly_budget": 650.5, "kind": "spending"})
         c = self.conn()
         row = c.execute("SELECT * FROM envelopes WHERE id = ?", (gid,)).fetchone()
         c.close()
         self.assertEqual((row["monthly_budget_cents"], row["rollover_mode"]), (65050, "rollover"))
-        for bad in ({"kind": "bogus"}, {"rollover_mode": "never"}, {"monthly_budget": -5}, {"monthly_budget": "x"}, {"goal_date": "nope"}):
+        for bad in ({"kind": "bogus"}, {"monthly_budget": -5}, {"monthly_budget": "x"}, {"goal_date": "nope"}):
             with self.assertRaises(HttpError):
                 self.call(self.app.save_envelope_settings, dict({"id": gid}, **bad))
         with self.assertRaises(HttpError):

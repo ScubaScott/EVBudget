@@ -1,7 +1,7 @@
-"""Envelope balances, month-end sweeps, markers, paycheck fills, and transfers.
+"""Envelope balances, markers, paycheck fills, and transfers.
 
 Balances are never stored. They are worked out from three things:
-  - money moves (opening balances, fills, transfers, sweeps)
+  - money moves (opening balances, fills, transfers; older databases may also hold retired month-end sweeps)
   - spending and refunds tagged to the envelope
   - income, which lands in Unallocated until a fill moves it out
 All of it counts only from the go-live date on.
@@ -34,14 +34,6 @@ def go_live_date(conn: Any) -> Optional[date]:
 
 def _first_of_month(d: date) -> date:
     return d.replace(day=1)
-
-
-def _next_month_first(d: date) -> date:
-    return date(d.year + 1, 1, 1) if d.month == 12 else date(d.year, d.month + 1, 1)
-
-
-def _last_of_month(d: date) -> date:
-    return date(d.year, d.month, calendar.monthrange(d.year, d.month)[1])
 
 
 # ---------------------------------------------------------------------------
@@ -96,44 +88,6 @@ def balances(
     return dict(bal)
 
 
-def ensure_sweeps(conn: Any, as_of: date) -> int:
-    """Move leftover money out of 'start fresh' envelopes for each month that has finished.
-
-    A positive balance at month end goes to Unallocated on the 1st of the next month.
-    Negative balances carry forward. Each month is processed once.
-    """
-    G = go_live_date(conn)
-    if G is None:
-        return 0
-    done = store.get_setting(conn, "sweeps_through") or ""
-    y, m = G.year, G.month
-    created = 0
-    idx = _envelope_index(conn)
-    reset_envs = [
-        int(r["id"]) for r in conn.execute("SELECT id FROM envelopes WHERE kind != 'system' AND rollover_mode = 'reset'")
-    ]
-    now = datetime.now().isoformat()
-    while date(y, m, 1) < _first_of_month(as_of):
-        key = f"{y}-{m:02d}"
-        if key > done:
-            end = _last_of_month(date(y, m, 1))
-            bal = balances(conn, G, end, end)
-            for env_id in reset_envs:
-                if bal.get(env_id, 0) > 0 and not conn.execute(
-                    "SELECT 1 FROM envelope_moves WHERE move_type = 'sweep' AND period_key = ? AND from_envelope_id = ? AND voided_at IS NULL",
-                    (key, env_id)).fetchone():
-                    conn.execute(
-                        """INSERT INTO envelope_moves (date, from_envelope_id, to_envelope_id, amount_cents, move_type, period_key, note, created_at)
-                           VALUES (?, ?, ?, ?, 'sweep', ?, 'Month-end leftover', ?)""",
-                        (_next_month_first(end).isoformat(), env_id, idx["unalloc"], bal[env_id], key, now))
-                    created += 1
-            store.set_setting(conn, "sweeps_through", key)
-        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
-    if created or done != (store.get_setting(conn, "sweeps_through") or ""):
-        conn.commit()
-    return created
-
-
 # ---------------------------------------------------------------------------
 # Targets: capacity, "should have" marker, status
 # ---------------------------------------------------------------------------
@@ -162,7 +116,6 @@ def envelope_states(conn: Any, as_of: date) -> Dict[str, Any]:
     G = go_live_date(conn)
     if G is None:
         return {"enabled": False, "go_live_date": None, "as_of": as_of.isoformat(), "envelopes": []}
-    ensure_sweeps(conn, as_of)
     bal = balances(conn, G, as_of, as_of)
     month_start = _first_of_month(as_of)
     carry = balances(conn, G, as_of, month_start - timedelta(days=1), carry_month_start=month_start)
@@ -210,7 +163,7 @@ def envelope_states(conn: Any, as_of: date) -> Dict[str, Any]:
 
         if balance < 0:
             status = "overdrawn"
-        elif capacity > 0 and balance >= capacity:
+        elif balance > 0 and balance >= capacity:  # includes a target of zero or less (a carried-in deficit)
             status = "funded"
         elif marker is not None and balance < marker * 0.9:
             status = "behind"
@@ -288,21 +241,6 @@ def check_invariant(conn: Any, as_of: date) -> Dict[str, Any]:
     return {"sum_of_balances": sum(bal.values()), "expected": opening + flow, "ok": sum(bal.values()) == opening + flow}
 
 
-def reopen_sweeps(conn: Any, from_date: date) -> None:
-    """A fill or transfer dated in a month that was already swept changes that month's leftovers.
-
-    Undo the month-end sweeps from that month on; they are worked out again the next time balances are read.
-    """
-    done = store.get_setting(conn, "sweeps_through") or ""
-    key = f"{from_date.year}-{from_date.month:02d}"
-    if not done or key > done:
-        return
-    conn.execute("UPDATE envelope_moves SET voided_at = ? WHERE move_type = 'sweep' AND voided_at IS NULL AND period_key >= ?",
-                 (datetime.now().isoformat(), key))
-    y, m = (from_date.year, from_date.month - 1) if from_date.month > 1 else (from_date.year - 1, 12)
-    store.set_setting(conn, "sweeps_through", f"{y}-{m:02d}")
-
-
 # ---------------------------------------------------------------------------
 # Fill queue, drafts, suggestions
 # ---------------------------------------------------------------------------
@@ -314,13 +252,25 @@ def fill_queue(conn: Any) -> List[Dict[str, Any]]:
         return []
     rows = conn.execute(
         """SELECT t.txn_id, t.date, t.name, t.amount, t.txn_kind, t.income_subtype, t.income_source_id, t.person_id,
-                  t.income_label, p.name AS person_name, s.name AS source_name
+                  t.income_label, p.name AS person_name, s.name AS source_name,
+                  (SELECT COALESCE(SUM(a.total_cents), 0) FROM allocations a
+                   WHERE a.income_txn_id = t.txn_id AND a.status = 'confirmed') AS allocated_cents
            FROM transactions t
            LEFT JOIN people p ON p.id = t.person_id LEFT JOIN income_sources s ON s.id = t.income_source_id
            WHERE t.is_included = 1 AND t.txn_kind IN ('paycheck', 'other_income') AND t.date >= ?
-             AND NOT EXISTS (SELECT 1 FROM allocations a WHERE a.income_txn_id = t.txn_id AND a.status = 'confirmed')
            ORDER BY t.date DESC, t.txn_id""", (G.isoformat(),)).fetchall()
-    return [dict(r, amount=float(r["amount"])) for r in rows]
+    out = []
+    for r in rows:
+        alloc = int(r["allocated_cents"])
+        if alloc >= to_cents(r["amount"]):
+            continue
+        d = {k: r[k] for k in r.keys() if k != "allocated_cents"}
+        d["amount"] = float(r["amount"])
+        d["allocated"] = to_dollars(alloc)
+        d["remaining"] = round(d["amount"] - d["allocated"], 2)
+        d["partial"] = alloc > 0
+        out.append(d)
+    return out
 
 
 def get_allocation(conn: Any, txn_id: str) -> Optional[Dict[str, Any]]:
@@ -411,9 +361,6 @@ def void_allocation(conn: Any, allocation_id: int) -> None:
     if a is None or a["status"] != "confirmed":
         raise ValidationError("That allocation isn't active")
     now = datetime.now().isoformat()
-    first = conn.execute("SELECT MIN(date) FROM envelope_moves WHERE allocation_id = ? AND voided_at IS NULL", (allocation_id,)).fetchone()[0]
-    if first:
-        reopen_sweeps(conn, date.fromisoformat(first))
     conn.execute("UPDATE envelope_moves SET voided_at = ? WHERE allocation_id = ? AND voided_at IS NULL", (now, allocation_id))
     # Free the deposit to be allocated again, keeping a record of where it came from.
     conn.execute(
@@ -462,7 +409,6 @@ def confirm_allocation(
         unalloc = balances(conn, G, as_of if as_of > when else when, as_of if as_of > when else when).get(idx["unalloc"], 0)
         if total > unalloc:
             raise ValidationError(f"That is {to_dollars(total - unalloc):,.2f} more than the {to_dollars(unalloc):,.2f} in Unallocated.")
-        reopen_sweeps(conn, when)
         now = datetime.now().isoformat()
         alloc_id = conn.execute(
             "INSERT INTO allocations (income_txn_id, template_id, total_cents, status, created_at) VALUES (?, ?, ?, 'confirmed', ?)",
@@ -493,7 +439,6 @@ def transfer(conn: Any, from_id: int, to_id: int, amount: Any, move_date: Option
     when = recurrence.parse(move_date or as_of.isoformat())
     if when is None or when < G:
         raise ValidationError("The date must be on or after go-live")
-    reopen_sweeps(conn, when)
     mid = conn.execute(
         """INSERT INTO envelope_moves (date, from_envelope_id, to_envelope_id, amount_cents, move_type, note, created_at)
            VALUES (?, ?, ?, ?, 'transfer', ?, ?)""", (when.isoformat(), from_id, to_id, cents, (note or "").strip() or None, datetime.now().isoformat())
@@ -508,7 +453,6 @@ def void_move(conn: Any, move_id: int) -> None:
         raise ValidationError("That move isn't active")
     if m["move_type"] not in ("transfer", "adjustment"):
         raise ValidationError("Only transfers can be undone here. Void a fill from its allocation.")
-    reopen_sweeps(conn, date.fromisoformat(m["date"]))
     conn.execute("UPDATE envelope_moves SET voided_at = ? WHERE id = ?", (datetime.now().isoformat(), move_id))
     conn.commit()
 
@@ -529,7 +473,7 @@ def ledger(conn: Any, envelope_id: int, start: Optional[str], end: Optional[str]
            WHERE m.voided_at IS NULL AND (m.from_envelope_id = ? OR m.to_envelope_id = ?)""", (envelope_id, envelope_id)):
         incoming = m["to_envelope_id"] == envelope_id
         other = m["from_envelope_id"] if incoming else m["to_envelope_id"]
-        label = {"opening": "Opening balance", "fill": "Paycheck fill", "sweep": "Month-end leftover", "transfer": "Transfer", "adjustment": "Adjustment"}[m["move_type"]]
+        label = {"opening": "Opening balance", "fill": "Paycheck fill", "sweep": "Month-end leftover (retired)", "transfer": "Transfer", "adjustment": "Adjustment"}[m["move_type"]]
         if other is not None and m["move_type"] in ("transfer", "sweep", "fill"):
             label += (" from " if incoming else " to ") + names.get(int(other), "?")
         entries.append({"date": m["date"], "kind": "move", "id": m["id"], "label": label, "note": m["note"] or "",

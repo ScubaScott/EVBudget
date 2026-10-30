@@ -1657,6 +1657,12 @@ footer.app-footer {
 
 .add-envelope-bar input {
     flex: 1;
+    min-width: 0;
+}
+
+.add-envelope-bar select {
+    flex: 0 0 auto;
+    width: 105px;
 }
 
 .envelope-toolbar {
@@ -2627,6 +2633,36 @@ footer.app-footer {
     display: flex;
     flex-direction: column;
     gap: 6px;
+}
+
+.env-timeline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.env-timeline input[type="range"] {
+    flex: 1 1 200px;
+    min-width: 120px;
+}
+
+.env-timeline .btn-refresh:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+.env-timeline-label {
+    flex: 0 0 auto;
+    width: 27ch;            /* fits the longest text ("12/31/2026 (30 days ago)") so the slider never resizes while dragging */
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    color: var(--text-primary, inherit);
 }
 
 .env-group {

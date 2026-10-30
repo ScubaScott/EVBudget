@@ -34,7 +34,7 @@
 | D2 | Positive transactions | **Paychecks** are tagged to a person through Income Source rules. **Refunds** return to the envelope they came from. **Reimbursements** (Venmo cashouts and payments received, usually paying you back for a shared expense or a bill you covered) are also refunds: they go back to a spending envelope that the user picks, or by linking the original expense. **Other income** (tax refund, Vrbo, Robinhood) is tagged `other_income` with a source label, and can be allocated like a paycheck. |
 | D3 | Bonuses | Paychecks have a subtype of `regular` or `bonus`. Bonus is auto-flagged when the check is more than 50% above the source's typical amount, and the user can override. Planning income uses **regular only**. |
 | D4 | Fill model | Each income source has a **fixed-dollar fill template**. A paycheck opens a pre-filled allocation screen, and the user confirms it. The remainder goes to Unallocated. Bonus and other income start empty, with a **Suggest** button. |
-| D5 | Rollover | Set **per envelope**: `rollover` or `reset`. Reset sweeps a positive leftover to Unallocated at period end. **Negative balances always carry forward.** |
+| D5 | Rollover | **Superseded.** Every envelope carries its balance forward, positive or negative. There is no automatic month-end sweep; money only leaves an envelope through a transfer you make. Sweeps made before this change stay in the history as "Month-end leftover (retired)". |
 | D6 | Target marker | **Two modes.** Spending envelopes pace *down* through the period. Bill and sinking envelopes accrue *up* toward the due date. |
 | D7 | Due dates | **Bill items inside envelopes.** Each has its own amount, due date, and recurrence. An envelope's bill target is the sum of its bills. |
 | D8 | Suggestions | Spending envelopes use the **last 6 complete months**. Bills use the **last 12 months**, annualized to a monthly amount. Show the average, median, min/max, and a confidence level. The user accepts or edits each one. |
@@ -191,7 +191,7 @@ Indexes: `(date)`, `(envelope)`, `(txn_kind, date)`, `(income_source_id, date)`,
 | id | INTEGER PK | |
 | name | TEXT UNIQUE | The display name. The dashboard keeps matching `transactions.envelope` by name, and rename updates both (same as today). |
 | kind | TEXT | `spending` · `bill` · `savings` · `system` |
-| rollover_mode | TEXT | `rollover` · `reset`. Defaults: spending → reset, bill and savings → rollover. |
+| rollover_mode | TEXT | Always `rollover`. Kept only so older databases open; any `reset` value is rewritten on open. |
 | monthly_budget_cents | INTEGER | **Spending:** the budget. **Bill:** derived from bills (read-only in the UI unless the envelope has no bills). **Savings:** the monthly contribution. |
 | goal_cents / goal_date | INTEGER / TEXT NULL | Savings only, optional (§6.5) |
 | sort_order | INTEGER | |
@@ -341,7 +341,7 @@ Let *G* be the go-live date and *D* the "as of" date (default: today).
 
 **Invariant (must be tested):** the sum of all envelope balances, including Unallocated, equals Σ opening moves + Σ income − Σ net spend over [G, D]. A negative Unallocated balance shows an "Over-allocated" warning.
 
-**Period sweeps (reset envelopes, D5).** These run when the app starts and when a balance is requested. For each `reset` envelope and each full calendar month since G with no sweep yet, if the balance at the end of that month is positive, create a `sweep` move to Unallocated dated the 1st of the next month, with `period_key = YYYY-MM`. A negative balance carries forward. Changing an envelope's mode does not rewrite past sweeps.
+**Period sweeps (retired; see D5).** The text below describes the old behavior and is kept for reference. Nothing creates or rewrites sweeps now. These used to run when the app starts and when a balance is requested. For each `reset` envelope and each full calendar month since G with no sweep yet, if the balance at the end of that month is positive, create a `sweep` move to Unallocated dated the 1st of the next month, with `period_key = YYYY-MM`. A negative balance carries forward. Changing an envelope's mode does not rewrite past sweeps.
 
 **Capacity (100% of the bar):**
 - **Spending:** carry-in + the monthly budget. Carry-in is the balance at the start of the month, after the sweep.
