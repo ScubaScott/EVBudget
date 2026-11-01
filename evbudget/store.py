@@ -7,7 +7,7 @@ import os
 import shutil
 import sqlite3
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from . import core_rules, paths
 
@@ -107,8 +107,14 @@ RULES_DDL = """CREATE TABLE IF NOT EXISTS rules (
         priority INTEGER NOT NULL DEFAULT 1000,
         origin TEXT NOT NULL DEFAULT 'user',
         active INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT
+        created_at TEXT,
+        name TEXT,
+        filter_type TEXT NOT NULL DEFAULT 'text',
+        direction TEXT NOT NULL DEFAULT 'any'
     )"""
+
+# Older databases get these added; a rule with no name is one that still has to be converted (see migrate_rules)
+RULE_COLUMNS = (("name", "TEXT"), ("filter_type", "TEXT NOT NULL DEFAULT 'text'"), ("direction", "TEXT NOT NULL DEFAULT 'any'"))
 
 SCHEMA_STATEMENTS = [
     "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT)",
@@ -269,10 +275,19 @@ def create_schema(conn: sqlite3.Connection) -> None:
     rule_cols = {r[1] for r in conn.execute("PRAGMA table_info(rules)")}
     if "description" not in rule_cols:
         conn.execute("ALTER TABLE rules ADD COLUMN description TEXT")
+    add_rule_columns(conn, "rules")
     for stmt in INDEX_STATEMENTS:
         conn.execute(stmt)
+    migrate_rules(conn, "rules", shared=False)
     # Envelopes used to offer 'start fresh' (month-end leftovers swept to Unallocated). Leftovers now always stay put.
     conn.execute("UPDATE envelopes SET rollover_mode = 'rollover' WHERE rollover_mode != 'rollover'")
+    # Savings envelopes became goals: a target amount with no date.
+    conn.execute("UPDATE envelopes SET kind = 'goal', goal_date = NULL WHERE kind = 'savings'")
+    # Envelopes now sort A-Z inside their type unless the owner reorders them (sort_order 0 = alphabetical).
+    # Older databases held creation-order numbers, so clear them once.
+    if not get_setting(conn, "envelope_order_v2"):
+        conn.execute("UPDATE envelopes SET sort_order = 0 WHERE kind != 'system'")
+        set_setting(conn, "envelope_order_v2", "1")
     conn.commit()
 
 
@@ -330,31 +345,74 @@ def guess_envelope_kind(name: str) -> Dict[str, str]:
 
 def insert_rule(conn: sqlite3.Connection, rule: Dict[str, Any], shared: bool = False, table: str = "rules") -> int:
     """Add a rule. Shared rules get an ID from SHARED_ID_BASE up; `table` is "shared.rules" when
-    writing through a connection that has the shared database attached."""
+    writing through a connection that has the shared database attached.
+
+    `stage`, `origin` and `label` are left over from when every rule did one thing and came from somewhere.
+    They are still written, because older databases require them, but nothing reads them any more.
+    """
     rule_id = None
     if shared:
         top = int(conn.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}").fetchone()[0])
         rule_id = max(top, SHARED_ID_BASE - 1) + 1
+    name = (rule.get("name") or "").strip() or (rule.get("phrase") or "").strip() or "Rule"
     cur = conn.execute(
         f"""INSERT INTO {table} (id, phrase, match_mode, stage, set_kind, set_envelope, set_payee, set_income_label,
-                              set_needs_review, exclusion_reason, label, priority, origin, active, created_at, description)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                              set_needs_review, exclusion_reason, label, priority, origin, active, created_at, description,
+                              name, filter_type, direction)
+           VALUES (?, ?, ?, 'rule', ?, ?, ?, ?, ?, ?, ?, ?, 'user', ?, ?, ?, ?, ?, ?)""",
         (
-            rule_id, rule["phrase"], rule.get("match_mode", "contains"), rule["stage"], rule.get("set_kind"),
+            rule_id, rule.get("phrase") or "", rule.get("match_mode", "contains"), rule.get("set_kind"),
             rule.get("set_envelope"), rule.get("set_payee"), rule.get("set_income_label"),
-            int(rule.get("set_needs_review") or 0), rule.get("exclusion_reason"), rule.get("label"),
-            int(rule.get("priority", 1000)), rule.get("origin", "user"), int(rule.get("active", 1)),
+            int(rule.get("set_needs_review") or 0), rule.get("exclusion_reason"), name,
+            int(rule.get("priority", 1000)), int(rule.get("active", 1)),
             rule.get("created_at") or datetime.now().isoformat(),
             (rule.get("description") or "").strip()[:120] or None,
+            name, rule.get("filter_type") or "text", rule.get("direction") or "any",
         ),
     )
     return int(rule_id if rule_id is not None else cur.lastrowid)
 
 
-def seed_core_rules(conn: sqlite3.Connection, shared: bool = False, table: str = "rules") -> int:
-    for rule in core_rules.core_rules():
-        insert_rule(conn, rule, shared, table)
-    return len(core_rules.core_rules())
+def add_rule_columns(conn: sqlite3.Connection, table: str) -> None:
+    have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    for col, ddl in RULE_COLUMNS:
+        if col not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+
+
+def _backup_before_rules(conn: sqlite3.Connection) -> str:
+    """Copy the database file this connection has open (the shared rules database, when it is opened on its own)."""
+    src = next((r[2] for r in conn.execute("PRAGMA database_list") if r[1] == "main"), "")
+    if not src or not os.path.exists(src):
+        return ""
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = f"{src}.before_rule_update_{stamp}.bak"
+    bak = sqlite3.connect(dest)
+    try:
+        conn.backup(bak)
+    finally:
+        bak.close()
+    return dest
+
+
+def migrate_rules(conn: sqlite3.Connection, table: str, shared: bool) -> int:
+    """Convert rules that still do one thing each into named rules that can do several.
+
+    Runs once: rules the converter has finished all have a name. The database is copied first. Returns the
+    number of rules after the conversion (0 if there was nothing to do).
+    """
+    from . import rule_migration
+
+    if conn.execute(f"SELECT COUNT(*) FROM {table} WHERE name IS NULL").fetchone()[0] == 0:
+        return 0
+    rows = [dict(r) for r in conn.execute(f"SELECT * FROM {table}")]
+    _backup_before_rules(conn)
+    converted = rule_migration.convert_rules(rows)
+    conn.execute(f"DELETE FROM {table}")
+    for r in converted:
+        insert_rule(conn, r, shared=shared, table=table)
+    conn.commit()
+    return len(converted)
 
 
 def _read_json(path: str) -> Any:
@@ -367,12 +425,10 @@ def _read_json(path: str) -> Any:
         return None
 
 
-def seed_legacy_rules(conn: sqlite3.Connection, shared: bool = False, table: str = "rules") -> Dict[str, int]:
-    """Bring over learned rules and known vendors from the pre-3.0 JSON files."""
-    counts = {"user": 0, "vendor": 0}
-    seen = {(r[0].upper(), r[1]) for r in conn.execute(f"SELECT phrase, stage FROM {table}")}
+def legacy_seed_rows() -> List[Dict[str, Any]]:
+    """The built-in rules and anything learned before version 3, in the old one-action-per-rule shape."""
+    rows = [dict(r) for r in core_rules.core_rules()]
     user_phrases = set()
-
     data = _read_json(paths.LEGACY_USER_RULES_PATH) or {}
     for idx, r in enumerate(data.get("phrase_rules", [])):
         phrase = (r.get("phrase") or "").strip()
@@ -387,43 +443,47 @@ def seed_legacy_rules(conn: sqlite3.Connection, shared: bool = False, table: str
             else "payee"
         )
         user_phrases.add(phrase.upper())
-        if (phrase.upper(), stage) in seen:
-            continue
-        seen.add((phrase.upper(), stage))
-        insert_rule(conn, {
-            "phrase": phrase, "stage": stage, "origin": "user", "priority": 100 + min(idx, 399),
+        rows.append({
+            "phrase": phrase, "stage": stage, "priority": 100 + min(idx, 399),
             "set_envelope": (r.get("envelope") or "").strip() or None,
             "set_payee": (r.get("payee") or "").strip() or None,
             "set_kind": "expense" if stage == "include_override" else None,
             "exclusion_reason": "User Learned Rule" if stage == "exclude" else None,
-            "label": "User Learned Rule",
-        }, shared, table)
-        counts["user"] += 1
-
+        })
     vendors = (_read_json(paths.LEGACY_KNOWN_VENDORS_PATH) or {}).get("vendors", {})
     for idx, (phrase, info) in enumerate(vendors.items()):
         phrase = phrase.strip()
         env = (info.get("envelope") or "").strip()
         if not phrase or not env or phrase.upper() in user_phrases:
             continue
-        insert_rule(conn, {
-            "phrase": phrase, "stage": "envelope", "origin": "vendor", "match_mode": "vendor",
-            "priority": 500 + min(idx, 499), "set_envelope": env, "label": "Known Vendor DB",
-        }, shared, table)
-        counts["vendor"] += 1
-    return counts
+        rows.append({"phrase": phrase, "stage": "envelope", "match_mode": "vendor", "priority": 500 + min(idx, 499), "set_envelope": env})
+    for i, r in enumerate(rows, 1):
+        r["id"] = i
+    return rows
+
+
+def seed_rules(conn: sqlite3.Connection, shared: bool = False, table: str = "rules") -> int:
+    """Put the starting rules into an empty rules table."""
+    from . import rule_migration
+
+    converted = rule_migration.convert_rules(legacy_seed_rows())
+    for r in converted:
+        insert_rule(conn, r, shared=shared, table=table)
+    return len(converted)
 
 
 def ensure_shared(shared_path: str) -> None:
-    """Create the shared rules database. The built-in rules (and any pre-3.0 learned rules) go in on first creation."""
+    """Create the shared rules database. The starting rules go in on first creation."""
     os.makedirs(os.path.dirname(shared_path), exist_ok=True)
     conn = connect(shared_path)
     try:
         conn.execute(RULES_DDL)
+        add_rule_columns(conn, "rules")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rules_stage ON rules(stage, priority)")
         if conn.execute("SELECT COUNT(*) FROM rules").fetchone()[0] == 0:
-            seed_core_rules(conn, shared=True)
-            seed_legacy_rules(conn, shared=True)
+            seed_rules(conn, shared=True)
+        else:
+            migrate_rules(conn, "rules", shared=True)
         conn.commit()
     finally:
         conn.close()
@@ -431,7 +491,7 @@ def ensure_shared(shared_path: str) -> None:
 
 def _rule_key(r: Any) -> tuple:
     return (
-        (r["phrase"] or "").upper(), r["stage"], r["match_mode"], r["origin"],
+        (r["phrase"] or "").upper(), r["match_mode"], r["filter_type"], r["direction"],
         (r["set_envelope"] or "").lower(), r["set_kind"] or "", r["set_payee"] or "",
     )
 
@@ -489,14 +549,14 @@ def seed_envelopes(conn: sqlite3.Connection) -> None:
             if row[0].lower() not in have:
                 names.append(row[0])
                 have.add(row[0].lower())
-    for order, name in enumerate(names):
+    for name in names:
         name = name.strip()
         if not name:
             continue
         guess = guess_envelope_kind(name)
         conn.execute(
             "INSERT OR IGNORE INTO envelopes (name, kind, rollover_mode, sort_order) VALUES (?, ?, ?, ?)",
-            (name, guess["kind"], guess["rollover_mode"], order),
+            (name, guess["kind"], guess["rollover_mode"], 0),
         )
 
 
@@ -610,8 +670,7 @@ def _migrate(conn: sqlite3.Connection, shared: bool = False, fresh: bool = False
     create_schema(conn)
     report["dates_converted"] = convert_dates_to_iso(conn)
     if not shared and conn.execute("SELECT COUNT(*) FROM rules").fetchone()[0] == 0:
-        report["core_rules"] = seed_core_rules(conn)
-        report["legacy_rules"] = seed_legacy_rules(conn)
+        report["rules"] = seed_rules(conn)
     if not fresh:
         seed_household(conn)
     seed_envelopes(conn)

@@ -6,8 +6,25 @@ let envUpcoming = [];
 let allocCtx = null;     // the allocation screen's working state
 let drawerEnvId = null;
 
-const GROUPS = [['spending', 'Spending'], ['bill', 'Bills'], ['savings', 'Savings']];
-const STATUS_LABELS = { on_track: 'On track', behind: 'Behind', overdrawn: 'Overdrawn', funded: 'Funded' };
+const GROUPS = [['spending', 'Spending'], ['bill', 'Bills'], ['goal', 'Goals']];
+const STATUS_LABELS = {
+    on_track: 'On track', behind: 'Behind', overdrawn: 'Overdrawn', funded: 'Funded',
+    saving: 'Saving', reached: 'Goal reached!', open: 'No goal set'
+};
+
+// Written across a goal's bar once it's reached. Each envelope keeps the same line (picked by its id),
+// so it doesn't change on every reload or while the time slider moves.
+const GOAL_CHEERS = [
+    g => `🎉 Nailed it! ${g} saved`,
+    g => `🏆 Goal crushed. Future you says thanks`,
+    g => `🥳 Mission accomplished. Treat yourself (a little)`,
+    g => `💰 ${g}! You absolute legend`,
+    g => `✨ Done and dusted. On to the next one?`,
+    g => `🚀 ${g} reached. Nothing can stop you now`,
+    g => `🎯 Bullseye! Right on ${g}`,
+    g => `🙌 You did it! Every dollar of ${g}`,
+];
+function goalCheer(e) { return GOAL_CHEERS[e.id % GOAL_CHEERS.length](m$(e.goal)); }
 
 document.addEventListener('tabchange', (e) => { if (e.detail.tab === 'envelopes') loadEnvelopesTab(); });
 document.addEventListener('txnsrefreshed', () => { if (typeof activeTab !== 'undefined' && activeTab === 'envelopes') loadEnvelopesTab(); });
@@ -47,6 +64,7 @@ function renderEnvelopesTab() {
     renderEnvQueue();
     renderEnvUpcoming();
     if (drawerEnvId) renderEnvDrawer();
+    celebrateNewGoals(envState);
 }
 
 // ---------------------------------------------------------------------
@@ -164,6 +182,7 @@ function renderEnvChart(state = envState) {
         if (!rows.length) return;
         html += `<div class="env-group">${label}</div>`;
         rows.forEach(e => {
+            if (e.kind === 'goal') { html += goalRow(e, neg, pos); return; }
             const frac = pctOf(e.balance, e.capacity);
             const fillW = Math.min(1, frac) * pos;
             const over = frac > 1.0001 || (e.capacity <= 0 && e.balance > 0);
@@ -188,6 +207,70 @@ function renderEnvChart(state = envState) {
         });
     });
     document.getElementById('envChart').innerHTML = html || '<div class="import-more">No active envelopes.</div>';
+}
+
+// A goal fills toward its amount with no "should have by now" line. Reached goals get a cheer on the bar.
+function goalRow(e, neg, pos) {
+    const reached = e.status === 'reached';
+    const fillW = e.balance > 0 ? Math.min(1, pctOf(e.balance, e.capacity)) * pos : 0;
+    const negW = e.balance < 0 ? Math.min(1, Math.abs(e.balance) / Math.max(e.capacity, Math.abs(e.balance), 1)) * neg : 0;
+    const over = reached && e.balance > e.goal ? e.balance - e.goal : 0;
+    const nums = e.goal ? `${m$(e.balance)} <span class="env-of">/ ${m$(e.goal)}</span>` : `${m$(e.balance)} <span class="env-of">saved</span>`;
+    const detail = e.status === 'saving' ? `${e.pct}% &middot; ${m$(e.to_go)} to go`
+        : over ? `+${m$(over)} over` : e.status === 'open' ? 'add an amount on the Budget tab' : '';
+    const tip = e.goal
+        ? `${e.name}: ${m$(e.balance)} of ${m$(e.goal)}${reached ? ' — goal reached!' : ` (${m$(e.to_go)} to go)`}`
+        : `${e.name}: ${m$(e.balance)} saved. No goal amount yet.`;
+    return `<div class="env-row" onclick="openEnvDrawer(${e.id})" title="${escapeHtml(tip)}" tabindex="0" onkeydown="if (event.key==='Enter') openEnvDrawer(${e.id})">
+        <div class="env-label"><span class="env-name">${escapeHtml(e.name)}</span><span class="env-nums">${nums}</span></div>
+        <div class="env-track${reached ? ' env-track-reached' : ''}">
+            ${neg ? `<div class="env-zero" style="left:${neg}%"></div>` : ''}
+            ${negW ? `<div class="env-fill st-overdrawn" style="left:${neg - negW}%; width:${negW}%"></div>` : ''}
+            ${fillW ? `<div class="env-fill st-${e.status}" style="left:${neg}%; width:${fillW}%"></div>` : ''}
+            ${reached ? `<div class="env-goal-cheer">${escapeHtml(goalCheer(e))}</div>` : ''}
+        </div>
+        <div class="env-status"><span class="env-chip st-${e.status}">${STATUS_LABELS[e.status]}</span>${detail ? `<span class="env-due">${detail}</span>` : ''}</div>
+    </div>`;
+}
+
+// ---------------------------------------------------------------------
+// Confetti, once per goal: the first time the page shows it reached (remembered per goal amount,
+// so raising the goal and reaching it again celebrates again)
+// ---------------------------------------------------------------------
+const CELEBRATED_KEY = 'evbudget_goals_celebrated';
+const celebratedThisVisit = new Set();   // fallback when browser storage is blocked
+
+function celebrateNewGoals(state) {
+    const reached = state.envelopes.filter(e => e.active && e.kind === 'goal' && e.status === 'reached');
+    if (!reached.length) return;
+    let seen = [];
+    try { seen = JSON.parse(localStorage.getItem(CELEBRATED_KEY) || '[]'); } catch (err) { /* storage blocked */ }
+    const fresh = reached.filter(e => !seen.includes(`${e.id}:${e.goal}`) && !celebratedThisVisit.has(`${e.id}:${e.goal}`));
+    if (!fresh.length) return;
+    fresh.forEach(e => celebratedThisVisit.add(`${e.id}:${e.goal}`));
+    try { localStorage.setItem(CELEBRATED_KEY, JSON.stringify([...seen, ...fresh.map(e => `${e.id}:${e.goal}`)])); } catch (err) { /* storage blocked */ }
+    showToast(fresh.length === 1 ? `🎉 ${fresh[0].name} reached its ${m$(fresh[0].goal)} goal!` : `🎉 ${fresh.length} goals reached!`);
+    launchConfetti();
+}
+
+function launchConfetti() {
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const colors = ['#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#facc15', '#14b8a6'];
+    const layer = document.createElement('div');
+    layer.className = 'confetti-layer';
+    for (let i = 0; i < 120; i++) {
+        const p = document.createElement('i');
+        p.style.left = Math.random() * 100 + 'vw';
+        p.style.background = colors[i % colors.length];
+        p.style.setProperty('--drift', (Math.random() * 30 - 15) + 'vw');
+        p.style.setProperty('--spin', (Math.random() * 1080 - 540) + 'deg');
+        p.style.animationDelay = Math.random() * 0.6 + 's';
+        p.style.animationDuration = 2.2 + Math.random() * 1.6 + 's';
+        if (i % 3 === 0) p.style.borderRadius = '50%';
+        layer.appendChild(p);
+    }
+    document.body.appendChild(layer);
+    setTimeout(() => layer.remove(), 4600);
 }
 
 function renderEnvQueue() {
@@ -323,11 +406,16 @@ function renderAllocModal() {
         : c.lines.map((l, i) => {
             const e = c.envs.find(x => x.id === l.envelope_id) || {};
             const gap = e.gap;
+            // Goals have no "should have by now"; show the goal amount and what's left to save instead
+            const target = e.kind === 'goal' ? (e.goal ? m$(e.goal) + ' goal' : '—')
+                : (e.marker === null || e.marker === undefined ? '—' : m$(e.marker));
+            const short = e.kind === 'goal' ? (!e.goal ? '—' : (e.to_go > 0 ? m$(e.to_go) + ' to go' : 'reached 🎉'))
+                : (gap === null || gap === undefined ? '—' : (gap > 0 ? m$(gap) + ' short' : 'on pace'));
             return `<tr>
                 <td><select class="select-input import-mini" onchange="allocSetEnv(${i}, parseInt(this.value, 10))">${active.filter(x => x.id === l.envelope_id || !used.has(x.id)).map(x => `<option value="${x.id}" ${x.id === l.envelope_id ? 'selected' : ''}>${escapeHtml(x.name)}</option>`).join('')}</select></td>
                 <td style="text-align:right;">${m$(e.balance)}</td>
-                <td style="text-align:right;">${e.marker === null || e.marker === undefined ? '—' : m$(e.marker)}</td>
-                <td style="text-align:right;" class="${gap > 0 ? 'tpl-short' : ''}">${gap === null || gap === undefined ? '—' : (gap > 0 ? m$(gap) + ' short' : 'on pace')}</td>
+                <td style="text-align:right;">${target}</td>
+                <td style="text-align:right;" class="${e.kind !== 'goal' && gap > 0 ? 'tpl-short' : ''}">${short}</td>
                 <td><input type="number" step="0.01" min="0" class="input-number import-mini" value="${l.amount}" oninput="allocSetAmount(${i}, this.value)"></td>
                 <td><button type="button" class="btn-env-icon delete" onclick="allocRemove(${i})" title="Remove">&times;</button></td></tr>`;
         }).join('');
@@ -489,12 +577,15 @@ async function renderEnvDrawer() {
     const e = envState.envelopes.find(x => x.id === drawerEnvId);
     if (!e) { closeEnvDrawer(); return; }
     document.getElementById('drawerTitle').textContent = e.name;
-    document.getElementById('drawerSub').innerHTML =
-        `${KIND_OPTIONS_LABEL[e.kind]} &middot; budget ${m$(e.budget)} a month`;
-    document.getElementById('drawerFacts').innerHTML = [
-        ['Balance', m$(e.balance)], ['Target', e.marker === null ? '—' : m$(e.marker)], ['Full at', m$(e.capacity)],
-        ['Status', `<span class="env-chip st-${e.status}">${STATUS_LABELS[e.status]}</span>`]
-    ].map(([k, v]) => `<div class="drawer-fact"><div class="info-label">${k}</div><div class="drawer-val">${v}</div></div>`).join('');
+    const isGoal = e.kind === 'goal';
+    document.getElementById('drawerSub').innerHTML = isGoal
+        ? (e.goal ? `Goal &middot; saving up to ${m$(e.goal)}` : 'Goal &middot; open-ended')
+        : `${ENVELOPE_KIND_LABELS[e.kind]} &middot; budget ${m$(e.budget)} a month`;
+    const chip = ['Status', `<span class="env-chip st-${e.status}">${STATUS_LABELS[e.status]}</span>`];
+    const facts = isGoal
+        ? [['Saved', m$(e.balance)], ['Goal', e.goal ? m$(e.goal) : '—'], ['To go', e.goal ? m$(e.to_go) : '—'], chip]
+        : [['Balance', m$(e.balance)], ['Target', e.marker === null ? '—' : m$(e.marker)], ['Full at', m$(e.capacity)], chip];
+    document.getElementById('drawerFacts').innerHTML = facts.map(([k, v]) => `<div class="drawer-fact"><div class="info-label">${k}</div><div class="drawer-val">${v}</div></div>`).join('');
     const body = document.getElementById('drawerLedger');
     body.innerHTML = '<tr><td colspan="5">Loading…</td></tr>';
     try {
@@ -531,8 +622,6 @@ async function undoFillFromDrawer(allocationId) {
         await loadEnvelopesTab();
     } catch (err) { showToast(err.message, true); }
 }
-
-const KIND_OPTIONS_LABEL = { spending: 'Spending', bill: 'Bills', savings: 'Savings' };
 
 async function undoTransfer(id) {
     if (!confirm('Undo this transfer?')) return;

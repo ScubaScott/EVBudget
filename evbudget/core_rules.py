@@ -105,7 +105,7 @@ def core_rules() -> List[Dict[str, Any]]:
                 "MICROSOFT", "XBOX", "PLAYSTATION", "AMAZON DIGIT", "APPLE.COM", "ANTHROPIC", "CLAUDE",
                 "FRITZING", "CALIMOTO", "HABIT NEST", "AARP", "YOUTHONCOURSE",
             ],
-            "Bills: Subscriptions", "contains",
+            "Subscriptions", "contains",
         ),
         (
             [
@@ -158,6 +158,6 @@ def core_rules() -> List[Dict[str, Any]]:
 # Envelopes created on a brand-new database (an existing install keeps its own list).
 DEFAULT_ENVELOPES = [
     "Groceries", "Gas", "Shopping", "Restaurant", "Bills: Every Month", "Bills: One Time",
-    "Bills: Subscriptions", "Bills: Mortgage", "Insurance: Auto", "Property Taxes",
+    "Subscriptions", "Mortgage", "Insurance: Auto", "Property Taxes",
     "Insurance: Home", "Insurance: Motorcycle",
 ]

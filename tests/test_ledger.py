@@ -127,12 +127,59 @@ class MarkerTests(LedgerCase):
         _, by = self.states(D(2027, 3, 20))
         self.assertEqual(by["Insurance: Auto"]["marker"], 1800.0)
 
-    def test_savings_marker_runs_from_opening_to_goal(self):
-        self.start({"Gas": 0}, go_live="2026-01-01")
-        self.call(self.app.save_envelope_settings, {"id": self.eid("Gas"), "kind": "savings", "goal": 1000, "goal_date": "2027-01-01"})
-        _, by = self.states(D(2026, 7, 2))
-        self.assertAlmostEqual(by["Gas"]["marker"], 500.0, delta=5)
-        self.assertEqual(by["Gas"]["capacity"], 1000.0)
+
+class GoalTests(LedgerCase):
+    def goal(self, name, amount):
+        self.call(self.app.save_envelope_settings, {"id": self.eid(name), "kind": "goal", "goal": amount})
+
+    def test_goal_fills_toward_its_amount_with_no_target_line(self):
+        self.start({"Gas": 4000}, go_live="2026-11-01")
+        self.goal("Gas", 10000)
+        _, by = self.states(D(2026, 11, 16))
+        g = by["Gas"]
+        self.assertEqual((g["status"], g["capacity"], g["goal"], g["to_go"], g["pct"]), ("saving", 10000.0, 10000.0, 6000.0, 40))
+        self.assertIsNone(g["marker"])   # no date, so never "behind"
+
+    def test_reached_and_over_the_goal(self):
+        self.start({"Gas": 10000, "Shopping": 10250.5}, go_live="2026-11-01")
+        self.goal("Gas", 10000)
+        self.goal("Shopping", 10000)
+        _, by = self.states(D(2026, 11, 2))
+        self.assertEqual((by["Gas"]["status"], by["Gas"]["to_go"], by["Gas"]["pct"]), ("reached", 0.0, 100))
+        self.assertEqual((by["Shopping"]["status"], by["Shopping"]["pct"]), ("reached", 102))
+
+    def test_moving_money_out_drops_back_to_saving(self):
+        self.start({"Gas": 1000}, go_live="2026-10-01")
+        self.goal("Gas", 1000)
+        self.call(self.app.move_transfer, {"from_envelope_id": self.eid("Gas"), "to_envelope_id": self.eid("Groceries"), "amount": 300, "date": "2026-10-05"},
+                  query={"as_of": "2026-10-10"})
+        _, by = self.states(D(2026, 10, 10))
+        self.assertEqual((by["Gas"]["status"], by["Gas"]["to_go"]), ("saving", 300.0))
+        self.invariant(D(2026, 10, 10))
+
+    def test_open_ended_goal_and_overdrawn_goal(self):
+        self.start({"Gas": 250, "Shopping": -20}, go_live="2026-11-01")
+        self.call(self.app.save_envelope_settings, {"id": self.eid("Gas"), "kind": "goal"})
+        self.goal("Shopping", 500)
+        _, by = self.states(D(2026, 11, 2))
+        self.assertEqual((by["Gas"]["status"], by["Gas"]["goal"], by["Gas"]["to_go"], by["Gas"]["capacity"]), ("open", None, None, 250.0))
+        self.assertEqual(by["Shopping"]["status"], "overdrawn")
+
+    def test_suggest_splits_leftover_across_goals_once_everything_else_is_full(self):
+        self.start({"Gas": 900}, go_live="2026-11-01")   # every other envelope has no budget, so all are full
+        self.goal("Gas", 1000)
+        self.goal("Shopping", 5000)
+        res = self.call(self.app.allocation_suggest, {"amount": 1000}, query={"as_of": "2026-11-16"})["lines"]
+        got = {l["envelope_id"]: l["amount"] for l in res}
+        self.assertEqual(got, {self.eid("Gas"): 100.0, self.eid("Shopping"): 900.0})   # Gas only needed 100
+
+    def test_suggest_leaves_goals_alone_while_another_envelope_is_not_full(self):
+        self.start({}, go_live="2026-11-01")
+        self.budget("Groceries", 600)
+        self.goal("Shopping", 5000)
+        res = self.call(self.app.allocation_suggest, {"amount": 100000}, query={"as_of": "2026-11-16"})["lines"]
+        got = {l["envelope_id"]: l["amount"] for l in res}
+        self.assertEqual(got, {self.eid("Groceries"): 300.0})   # on track is not full, so the goal waits
 
 
 class FillTests(LedgerCase):
@@ -466,7 +513,7 @@ class BillMatchTests(LedgerCase):
         self.assertEqual(self.bill()["amount_cents"], 10000)
 
     def test_upcoming_and_overdue(self):
-        self.call(self.app.save_bill, {"envelope_id": self.eid("Bills: Subscriptions"), "name": "Old", "amount": 10, "freq": "monthly",
+        self.call(self.app.save_bill, {"envelope_id": self.eid("Subscriptions"), "name": "Old", "amount": 10, "freq": "monthly",
                                        "interval": 1, "anchor_date": "2026-09-01", "next_due_date": "2026-09-01"})
         res = self.call(self.app.upcoming_bills, query={"as_of": "2026-10-10", "days": "30"}, method="GET")["bills"]
         self.assertEqual([(b["name"], b["overdue"]) for b in res], [("Old", True), ("Internet", False)])

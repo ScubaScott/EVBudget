@@ -14,7 +14,13 @@ const KIND_LABELS = {
     transfer: 'Transfer',
     cc_payment: 'Card payment'
 };
+// What a transaction with a blank envelope is called (not the same as the Unallocated money pool on the Envelopes tab)
+const NO_ENVELOPE = 'No envelope';
 const EXCLUDED_KINDS = ['transfer', 'cc_payment'];
+
+// Envelope types, in the order they are listed everywhere: [value, label]
+const ENVELOPE_KINDS = [['spending', 'Spending'], ['bill', 'Bills'], ['goal', 'Goal']];
+const ENVELOPE_KIND_LABELS = Object.fromEntries(ENVELOPE_KINDS);
 const INCOME_KINDS = ['paycheck', 'other_income'];
 
 function personName(id) {
@@ -67,11 +73,6 @@ function closeSettingsModal() {
     document.body.style.overflow = '';
 }
 
-function handleSettingsOverlayClick(event) {
-    if (event.target === document.getElementById('settingsModalOverlay')) {
-        closeSettingsModal();
-    }
-}
 
 // ---------------------------------------------------------------------
 // Formatting

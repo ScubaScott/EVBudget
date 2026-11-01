@@ -106,10 +106,11 @@ class MigrationTests(unittest.TestCase):
 
     def test_legacy_rules_and_envelopes_come_across(self):
         store.ensure_schema(self.db)
-        user = self.rows("SELECT * FROM rules WHERE origin = 'user' ORDER BY priority")
-        self.assertEqual([(r["phrase"], r["stage"]) for r in user], [("BARBER", "envelope"), ("BILL PAY X", "payee")])
-        vendors = self.rows("SELECT phrase FROM rules WHERE origin = 'vendor'")
-        self.assertEqual([r["phrase"] for r in vendors], ["KROGER"])
+        by = {r["phrase"]: r for r in self.rows("SELECT * FROM rules WHERE name IS NOT NULL")}
+        self.assertEqual((by["BARBER"]["set_envelope"], by["BARBER"]["set_payee"]), ("Bills: One Time", None))
+        self.assertEqual((by["BILL PAY X"]["set_envelope"], by["BILL PAY X"]["set_payee"]), (None, "X CORP"))
+        self.assertEqual((by["KROGER"]["set_envelope"], by["KROGER"]["match_mode"]), ("Groceries", "contains"))
+        self.assertEqual(self.rows("SELECT COUNT(*) AS n FROM rules WHERE name IS NULL")[0]["n"], 0)
         env = [r["name"] for r in self.rows("SELECT name FROM envelopes WHERE kind != 'system' ORDER BY sort_order")]
         self.assertEqual(env, ["Groceries", "Restaurant", "Shopping", "Bills: One Time"])
         self.assertFalse(os.path.exists(paths.LEGACY_ENVELOPES_PATH))

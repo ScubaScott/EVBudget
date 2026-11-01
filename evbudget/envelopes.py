@@ -6,8 +6,10 @@ from typing import Any, Dict, List, Optional
 
 from . import recurrence, store
 
-KINDS = ("spending", "bill", "savings")
+KINDS = ("spending", "bill", "goal")
 AMOUNT_MODES = ("fixed", "estimated")
+# Within an envelope type: hand-placed envelopes (10, 20, ...) first in that order, otherwise A-Z.
+ORDER_SQL = "sort_order, name COLLATE NOCASE"
 
 
 class ValidationError(ValueError):
@@ -272,17 +274,21 @@ def list_envelopes(conn: Any, today: Optional[date] = None) -> List[Dict[str, An
     for b in list_bills(conn, today=today):
         bills_by_env.setdefault(b["envelope_id"], []).append(b)
     out = []
-    for r in conn.execute("SELECT * FROM envelopes WHERE kind != 'system' ORDER BY sort_order, id"):
+    for r in conn.execute("SELECT * FROM envelopes WHERE kind != 'system' ORDER BY " + ORDER_SQL + ", id"):
         e = dict(r)
         bills = bills_by_env.get(e["id"], [])
         active_bills = [b for b in bills if b["active"]]
         derived = e["kind"] == "bill" and bool(active_bills)
         bills_monthly = sum(b["monthly_amount"] for b in active_bills)
+        if e["kind"] == "goal":
+            effective = 0.0  # goals take extra money when there is some, not a monthly amount
+        else:
+            effective = round(bills_monthly, 2) if derived else to_dollars(e["monthly_budget_cents"])
         e.update(
             bills=bills, budget_derived=derived,
             monthly_budget=to_dollars(e["monthly_budget_cents"]),
             bills_monthly=round(bills_monthly, 2),
-            effective_budget=round(bills_monthly, 2) if derived else to_dollars(e["monthly_budget_cents"]),
+            effective_budget=effective,
             goal=to_dollars(e["goal_cents"]) if e["goal_cents"] is not None else None,
         )
         out.append(e)
@@ -302,16 +308,41 @@ def save_envelope(conn: Any, data: Dict[str, Any]) -> None:
     goal = env["goal_cents"]
     if "goal" in data:
         goal = to_cents(data["goal"]) if data["goal"] not in (None, "") else None
-    goal_date = env["goal_date"]
-    if "goal_date" in data:
-        goal_date = str(data["goal_date"] or "").strip() or None
-        if goal_date and recurrence.parse(goal_date) is None:
-            raise ValidationError("The goal date must be a real date (YYYY-MM-DD)")
+        if goal is not None and goal <= 0:
+            raise ValidationError("A goal amount must be more than zero")
     active = env["active"] if "active" not in data else (0 if data["active"] in (0, False) else 1)
+    order = env["sort_order"] if kind == env["kind"] else next_order(conn, kind)
     conn.execute(
-        "UPDATE envelopes SET kind=?, monthly_budget_cents=?, goal_cents=?, goal_date=?, active=? WHERE id=?",
-        (kind, budget, goal, goal_date, active, env["id"]),
+        "UPDATE envelopes SET kind=?, monthly_budget_cents=?, goal_cents=?, goal_date=NULL, active=?, sort_order=? WHERE id=?",
+        (kind, budget, goal, active, order, env["id"]),
     )
+
+
+def next_order(conn: Any, kind: str) -> int:
+    """Sort number for an envelope joining a type: the end of a hand-ordered type, or 0 (A-Z) otherwise."""
+    top = conn.execute("SELECT COALESCE(MAX(sort_order), 0) FROM envelopes WHERE kind = ?", (kind,)).fetchone()[0]
+    return top + 10 if top > 0 else 0
+
+
+def reorder(conn: Any, kind: str, names: Optional[List[str]] = None, reset: bool = False) -> None:
+    """Put one type's envelopes in the given order (a list of names), or back to A-Z with reset=True."""
+    if kind not in KINDS:
+        raise ValidationError("Unknown envelope type")
+    rows = conn.execute("SELECT id, name FROM envelopes WHERE kind = ? ORDER BY " + ORDER_SQL + ", id", (kind,)).fetchall()
+    if reset:
+        conn.execute("UPDATE envelopes SET sort_order = 0 WHERE kind = ?", (kind,))
+        return
+    by_name = {r["name"].lower(): r["id"] for r in rows}
+    wanted: List[int] = []
+    for n in names or []:
+        eid = by_name.get(str(n).strip().lower())
+        if eid is None:
+            raise ValidationError(f"'{n}' is not a {kind} envelope")
+        if eid not in wanted:
+            wanted.append(eid)
+    wanted += [r["id"] for r in rows if r["id"] not in wanted]   # anything left out goes last, in its current order
+    for i, eid in enumerate(wanted, 1):
+        conn.execute("UPDATE envelopes SET sort_order = ? WHERE id = ?", (i * 10, eid))
 
 
 # ---------------------------------------------------------------------------

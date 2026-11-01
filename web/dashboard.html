@@ -114,12 +114,12 @@
                             <thead>
                                 <tr>
                                     <th style="width: 40px;"></th>
-                                    <th>File</th>
-                                    <th style="width: 110px;">Modified</th>
-                                    <th style="width: 150px;">Already in database</th>
-                                    <th style="width: 170px;">Card / account</th>
-                                    <th style="width: 170px;">Account type</th>
-                                    <th style="width: 190px;">Columns</th>
+                                    <th onclick="importFilesSortBy('name')">File <span id="ifsort_name" class="sort-indicator"></span></th>
+                                    <th onclick="importFilesSortBy('modified')" style="width: 110px;">Modified <span id="ifsort_modified" class="sort-indicator">&#9660;</span></th>
+                                    <th onclick="importFilesSortBy('imported')" style="width: 150px;">Already in database <span id="ifsort_imported" class="sort-indicator"></span></th>
+                                    <th onclick="importFilesSortBy('account')" style="width: 170px;">Card / account <span id="ifsort_account" class="sort-indicator"></span></th>
+                                    <th onclick="importFilesSortBy('type')" style="width: 170px;">Account type <span id="ifsort_type" class="sort-indicator"></span></th>
+                                    <th onclick="importFilesSortBy('columns')" style="width: 190px;">Columns <span id="ifsort_columns" class="sort-indicator"></span></th>
                                 </tr>
                             </thead>
                             <tbody id="importFileBody"></tbody>
@@ -164,7 +164,7 @@
                                     <th style="width: 150px;">Kind</th>
                                     <th style="width: 210px;">Envelope / person</th>
                                     <th onclick="importSortBy('status')" style="width: 130px;">Status <span id="isort_status" class="sort-indicator"></span></th>
-                                    <th onclick="importSortBy('match_source')" style="width: 150px;">Matched by <span id="isort_match_source" class="sort-indicator"></span></th>
+                                    <th onclick="importSortBy('match_source')" style="width: 230px;">Rules <span id="isort_match_source" class="sort-indicator"></span></th>
                                     <th style="width: 44px;"></th>
                                 </tr>
                             </thead>
@@ -198,7 +198,7 @@
                     <div class="table-header env-chart-header">
                         <div>
                             <div class="table-title">How full each envelope is</div>
-                            <div class="table-subtitle">The line marks where the envelope should be today, and its arrow shows which way that line is moving: left for spending envelopes as the month goes on, right for bills and savings as they build up. Click one for its history.</div>
+                            <div class="table-subtitle">The line marks where the envelope should be today, and its arrow shows which way that line is moving: left for spending envelopes as the month goes on, right for bills as they build up. Goals simply fill toward their amount. Click one for its history.</div>
                         </div>
                         <div class="table-header-actions">
                             <button class="btn-envelopes" id="btnOpenEnvelopes" onclick="openEnvelopeManagerModal()" title="Add, rename, or delete envelopes">
@@ -291,8 +291,8 @@
                             <tr>
                                 <th>Envelope</th>
                                 <th style="width: 135px;">Type</th>
-                                <th style="width: 150px;">Monthly budget</th>
-                                <th>Suggestion</th>
+                                <th style="width: 150px;" title="Goal envelopes take a goal amount here instead">Monthly budget</th>
+                                <th>Suggestion or progress</th>
                                 <th style="width: 110px;">Bills</th>
                                 <th style="width: 70px; text-align:center;" title="Untick to switch an envelope off">On</th>
                             </tr>
@@ -331,19 +331,8 @@
         <!-- ===================== INCOME TAB ===================== -->
         <div class="tab-panel" id="tab-income" hidden>
 
-            <section class="controls-card">
-                <div class="presets-row" id="incomePresets"></div>
-                <div class="income-dates">
-                    <div class="field-group">
-                        <label for="incomeStart">Start date</label>
-                        <input type="date" id="incomeStart" class="input-date" onchange="onIncomeDatesChange()">
-                    </div>
-                    <div class="field-group">
-                        <label for="incomeEnd">End date</label>
-                        <input type="date" id="incomeEnd" class="input-date" onchange="onIncomeDatesChange()">
-                    </div>
-                </div>
-            </section>
+            <!-- The shared filter bar (search, dates, envelope, kind, person) is moved in here when this tab is open -->
+            <div id="filterSlotIncome"></div>
 
             <section class="kpi-grid kpi-grid-wide" id="incomeKpis"></section>
 
@@ -424,7 +413,7 @@
                 <div class="table-header">
                     <div>
                         <div class="table-title">Income transactions</div>
-                        <div class="table-subtitle">Paychecks and other income in the timeframe above. Click a row to view or edit it.</div>
+                        <div class="table-subtitle">Paychecks and other income matching the filters above. Click a row to view or edit it.</div>
                     </div>
                     <div class="table-header-actions">
                         <div class="segmented-toggle">
@@ -456,8 +445,9 @@
         <!-- ===================== ANALYTICS TAB ===================== -->
         <div class="tab-panel" id="tab-analytics" hidden>
 
-        <!-- Controls: Timeframe Presets & Multi-criteria Filters -->
-        <section class="controls-card">
+        <!-- Controls: Timeframe Presets & Multi-criteria Filters. One bar shared by the Spending and Income tabs. -->
+        <div id="filterSlotAnalytics">
+        <section class="controls-card" id="sharedFilterBar">
             <!-- Preset Timeframe Buttons -->
             <div class="presets-row">
                 <span class="control-label">Preset:</span>
@@ -587,6 +577,7 @@
                 <button class="btn-clear" id="btnClearFilters" onclick="clearFilterCriteria()" title="Clear search and category filters without changing timeframe">Clear</button>
             </div>
         </section>
+        </div>
 
         <!-- KPI Summary Metric Tiles -->
         <section class="kpi-grid">
@@ -777,7 +768,7 @@
     </button>
 
     <!-- Transaction Detail & Edit Modal Dialog -->
-    <div class="modal-overlay" id="editModalOverlay" onclick="handleModalOverlayClick(event)">
+    <div class="modal-overlay" id="editModalOverlay">
         <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
             <div class="modal-header">
                 <div class="modal-title-wrap">
@@ -825,7 +816,7 @@
                         <div class="field-group">
                             <label for="editEnvelope">Envelope / Category</label>
                             <select id="editEnvelope" class="select-input">
-                                <option value="">(Leave Blank for Inflows / Unallocated)</option>
+                                <option value="">(No envelope: income &amp; transfers)</option>
                             </select>
                         </div>
 
@@ -972,7 +963,7 @@
     </div>
 
     <!-- Bulk Action Modal Dialog -->
-    <div class="modal-overlay" id="bulkModalOverlay" onclick="handleBulkOverlayClick(event)">
+    <div class="modal-overlay" id="bulkModalOverlay">
         <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="bulkModalTitle" style="max-width: 580px;">
             <div class="modal-header">
                 <div class="modal-title-wrap">
@@ -1061,14 +1052,6 @@
                             Match Keyword / Pattern in Raw Bank Description:
                         </label>
                         <input type="text" id="bulkRulePhrase" class="input-text" placeholder="e.g. PLANET FITNESS">
-                        <label style="font-size: 11.5px; font-weight: 500; color: var(--text-muted); display: block; margin: 10px 0 4px;">
-                            Who should this rule apply to?
-                        </label>
-                        <select id="bulkRuleScope" class="select-input">
-                            <option value="">Choose&hellip;</option>
-                            <option value="personal">Just me (this budget only)</option>
-                            <option value="shared">Everyone (shared with all budgets)</option>
-                        </select>
                         <div style="font-size: 11px; color: var(--text-dim); margin-top: 4px;">
                             Future CSV imports matching this phrase will automatically assign this clean payee, envelope, and status.
                         </div>
@@ -1089,7 +1072,7 @@
     </div>
 
     <!-- Dashboard Settings Modal with Theme Picker -->
-    <div class="modal-overlay" id="settingsModalOverlay" onclick="handleSettingsOverlayClick(event)">
+    <div class="modal-overlay" id="settingsModalOverlay">
         <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle" style="max-width: 540px;">
             <div class="modal-header">
                 <div class="modal-title-wrap">
@@ -1182,7 +1165,7 @@
     </div>
 
     <!-- Envelope Manager Modal Overlay -->
-    <div class="modal-overlay" id="envelopeModalOverlay" onclick="handleEnvelopeModalOverlayClick(event)">
+    <div class="modal-overlay" id="envelopeModalOverlay">
         <div class="modal-container envelope-manager-modal">
             <div class="modal-header">
                 <div class="modal-title-wrap">
@@ -1201,7 +1184,7 @@
                         <select id="newEnvelopeKind" class="select-input" title="What kind of envelope this is">
                             <option value="spending">Spending</option>
                             <option value="bill">Bills</option>
-                            <option value="savings">Savings</option>
+                            <option value="goal">Goal</option>
                         </select>
                         <button type="button" class="btn-modal-save" onclick="submitAddEnvelope()">+ Add</button>
                     </div>
@@ -1241,7 +1224,7 @@
     </div>
 
     <!-- Envelope Delete Warning & Reassignment Modal Overlay -->
-    <div class="modal-overlay" id="deleteEnvelopeModalOverlay" onclick="handleDeleteModalOverlayClick(event)">
+    <div class="modal-overlay" id="deleteEnvelopeModalOverlay">
         <div class="modal-container" style="max-width: 540px;">
             <div class="modal-header">
                 <div class="modal-title-wrap">
@@ -1308,7 +1291,7 @@
     </div>
 
     <!-- Audit dialog -->
-    <div class="modal-overlay" id="auditDlgOverlay" onclick="if (event.target === this) closeAuditDialog()">
+    <div class="modal-overlay" id="auditDlgOverlay">
         <div class="modal-container wide" role="dialog" aria-modal="true">
             <div class="modal-header">
                 <div class="modal-title-wrap">
@@ -1370,7 +1353,7 @@
     </div>
 
     <!-- Allocation screen -->
-    <div class="modal-overlay" id="allocModalOverlay" onclick="if (event.target === this) closeAllocModal()">
+    <div class="modal-overlay" id="allocModalOverlay">
         <div class="modal-container wide" role="dialog" aria-modal="true">
             <div class="modal-header">
                 <div class="modal-title-wrap">
@@ -1411,7 +1394,7 @@
     </div>
 
     <!-- Transfer -->
-    <div class="modal-overlay" id="transferModalOverlay" onclick="if (event.target === this) closeTransferModal()">
+    <div class="modal-overlay" id="transferModalOverlay">
         <div class="modal-container" role="dialog" aria-modal="true" style="max-width: 520px;">
             <div class="modal-header">
                 <div class="modal-title-wrap">
@@ -1471,7 +1454,7 @@
     </div>
 
     <!-- Bills for one envelope -->
-    <div class="modal-overlay" id="billsModalOverlay" onclick="if (event.target === this) closeBillsModal()">
+    <div class="modal-overlay" id="billsModalOverlay">
         <div class="modal-container wide" role="dialog" aria-modal="true">
             <div class="modal-header">
                 <div class="modal-title-wrap">
@@ -1560,7 +1543,7 @@
     </div>
 
     <!-- Go-live wizard -->
-    <div class="modal-overlay" id="goLiveModalOverlay" onclick="if (event.target === this) closeGoLiveModal()">
+    <div class="modal-overlay" id="goLiveModalOverlay">
         <div class="modal-container wide" role="dialog" aria-modal="true">
             <div class="modal-header">
                 <div class="modal-title-wrap">
@@ -1594,7 +1577,7 @@
     </div>
 
     <!-- Person -->
-    <div class="modal-overlay" id="personModalOverlay" onclick="if (event.target === this) closePersonModal()">
+    <div class="modal-overlay" id="personModalOverlay">
         <div class="modal-container" role="dialog" aria-modal="true" style="max-width: 460px;">
             <div class="modal-header">
                 <div class="modal-title-wrap"><div class="modal-title" id="personModalTitle">Person</div></div>
@@ -1633,7 +1616,7 @@
     </div>
 
     <!-- Pay source -->
-    <div class="modal-overlay" id="sourceModalOverlay" onclick="if (event.target === this) closeSourceModal()">
+    <div class="modal-overlay" id="sourceModalOverlay">
         <div class="modal-container" role="dialog" aria-modal="true" style="max-width: 640px;">
             <div class="modal-header">
                 <div class="modal-title-wrap">
@@ -1727,7 +1710,7 @@
     </div>
 
     <!-- Column mapping -->
-    <div class="modal-overlay" id="mappingModalOverlay" onclick="if (event.target === this) closeMappingModal()">
+    <div class="modal-overlay" id="mappingModalOverlay">
         <div class="modal-container" role="dialog" aria-modal="true" style="max-width: 620px;">
             <div class="modal-header">
                 <div class="modal-title-wrap">
@@ -1750,59 +1733,89 @@
     </div>
 
     <!-- Rules -->
-    <div class="modal-overlay" id="rulesModalOverlay" onclick="if (event.target === this) closeImportRulesModal()">
+    <div class="modal-overlay" id="rulesModalOverlay">
         <div class="modal-container wide" role="dialog" aria-modal="true">
             <div class="modal-header">
                 <div class="modal-title-wrap">
-                    <div class="modal-title">Classification rules</div>
-                    <div class="modal-subtitle">Rules decide each row's kind, envelope and payee during import. Rules marked Just me apply only to this budget and run first; rules marked Everyone are shared by all budgets.</div>
+                    <div class="modal-title">Rules</div>
+                    <div class="modal-subtitle">A rule finds something in a transaction and does one or more things to it. Rules run from the top. For each thing a rule can do (the name, the envelope, what kind of transaction it is) the first rule that does it wins. Every budget uses the same rules.</div>
                 </div>
                 <button class="modal-close-btn" onclick="closeImportRulesModal()" title="Close">&times;</button>
             </div>
             <div class="modal-body">
-                <input type="text" id="ruleNewDescription" class="input-text rules-desc-input" maxlength="120"
-                       placeholder="What this rule does, in a few words (optional), e.g. Remove Square POS prefix">
-                <div class="rules-add">
-                    <input type="text" id="ruleNewPhrase" class="input-text" placeholder="Text to look for (e.g. TARGET)" oninput="previewNewRule()">
-                    <select id="ruleNewAction" class="select-input" onchange="onRuleActionChange()">
-                        <option value="envelope">Send spending to envelope</option>
-                        <option value="refund">Treat as refund to envelope</option>
-                        <option value="other_income">Treat as other income</option>
-                        <option value="transfer">Exclude: transfer</option>
-                        <option value="cc_payment">Exclude: card payment</option>
-                        <option value="payee">Rename payee</option>
-                        <option value="include">Keep as spending (never exclude)</option>
-                    </select>
-                    <select id="ruleNewEnvelope" class="select-input"></select>
-                    <select id="ruleNewScope" class="select-input" title="Who this rule applies to">
-                        <option value="">Applies to&hellip;</option>
-                        <option value="personal">Just me</option>
-                        <option value="shared">Everyone</option>
-                    </select>
-                    <input type="text" id="ruleNewPayee" class="input-text" placeholder="New payee name" style="display: none;" oninput="previewNewRule()">
-                    <div class="rules-save-buttons">
-                        <button type="button" class="btn-modal-save" id="btnRuleSave" onclick="addImportRule()">Add rule</button>
-                        <button type="button" class="btn-modal-cancel" id="btnRuleCancel" onclick="cancelRuleEdit()" hidden>Cancel</button>
+                <div class="rule-form" id="ruleForm">
+                    <div class="rule-form-row">
+                        <label for="ruleName">Name</label>
+                        <input type="text" id="ruleName" class="input-text" maxlength="80" placeholder="e.g. Sam's Club"
+                               oninput="this.dataset.touched = '1'; onRuleFormChange()">
                     </div>
-                </div>
-                <div class="rules-regex-row">
-                    <label class="checkbox-row"><input type="checkbox" id="ruleNewRegex" onchange="onRuleActionChange()"> Match with a pattern (regular expression)</label>
+                    <div class="rule-form-row">
+                        <label for="ruleFindType">Find</label>
+                        <div class="rule-form-fields">
+                            <select id="ruleFindType" class="select-input" onchange="onRuleFormChange()">
+                                <option value="text">Text in the description</option>
+                                <option value="check">Any check</option>
+                                <option value="payment">Anything the bank marks as a payment</option>
+                                <option value="all">Everything</option>
+                            </select>
+                            <input type="text" id="ruleFindText" class="input-text" placeholder="Text to look for (e.g. SAMS CLUB)" oninput="onRuleFormChange()">
+                            <select id="ruleMatchMode" class="select-input" onchange="onRuleFormChange()" title="How the text is matched">
+                                <option value="contains">Contains</option>
+                                <option value="word">Whole word</option>
+                                <option value="regex">Pattern (advanced)</option>
+                            </select>
+                            <select id="ruleDirection" class="select-input" onchange="onRuleFormChange()">
+                                <option value="any">Money in or out</option>
+                                <option value="out">Money going out</option>
+                                <option value="in">Money coming in</option>
+                            </select>
+                        </div>
+                    </div>
                     <div class="rules-regex-hint" id="ruleRegexHint" hidden>
-                        For a rename, the matched part is replaced; use <code>\1</code> (or <code>$1</code>) for the first (group) you captured. Example:
-                        <code>SQ\s?\*\s?(.*)</code> &rarr; <code>\1</code> turns <em>SQ *Vendor</em> into <em>Vendor</em>, and
-                        <code>(.*?)\s*#\d+$</code> &rarr; <code>\1</code> turns <em>Store #3456</em> into <em>Store</em>.
-                        Pattern renames chain, so both can apply to one payee.
+                        A pattern can match more flexibly than plain text. For a rename, the part it matches is replaced; use <code>\1</code> (or <code>$1</code>) for the first (group) you captured. Example:
+                        <code>SQ\s?\*\s?(.*)</code> &rarr; <code>\1</code> turns <em>SQ *Vendor</em> into <em>Vendor</em>.
+                        Pattern renames chain, so several can apply to one payee. Give the rule a clear name so you can tell what it does at a glance.
                     </div>
-                    <div class="rules-regex-preview" id="ruleNewPreview"></div>
+                    <div class="rule-form-row">
+                        <label>Do</label>
+                        <div class="rule-do">
+                            <div class="rule-do-line">
+                                <label class="checkbox-row"><input type="checkbox" id="ruleDoRename" onchange="onRuleFormChange()"> Rename to</label>
+                                <input type="text" id="ruleRenameTo" class="input-text" placeholder="New name (e.g. Sam's Club)" oninput="onRuleFormChange()">
+                            </div>
+                            <div class="rule-do-line">
+                                <label class="checkbox-row"><input type="checkbox" id="ruleDoEnvelope" onchange="onRuleFormChange()"> Send to envelope</label>
+                                <select id="ruleEnvelope" class="select-input" onchange="onRuleFormChange()"></select>
+                            </div>
+                            <div class="rule-do-line">
+                                <label class="checkbox-row"><input type="checkbox" id="ruleDoKind" onchange="onRuleFormChange()"> Treat as</label>
+                                <select id="ruleKind" class="select-input" onchange="onRuleFormChange()">
+                                    <option value="expense">Spending (keep it, even if it looks like a transfer)</option>
+                                    <option value="refund">A refund or reimbursement</option>
+                                    <option value="other_income">Other income</option>
+                                    <option value="transfer">A transfer between my accounts (leave out)</option>
+                                    <option value="cc_payment">A card payment (leave out)</option>
+                                </select>
+                                <input type="text" id="ruleIncomeLabel" class="input-text" maxlength="60" placeholder="Income label (e.g. Tax Refund)" oninput="onRuleFormChange()">
+                            </div>
+                            <div class="rule-do-line">
+                                <label class="checkbox-row"><input type="checkbox" id="ruleDoReview" onchange="onRuleFormChange()"> Flag for review</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="rules-regex-preview" id="ruleEditorPreview"></div>
+                    <div class="rules-save-buttons">
+                        <button type="button" class="btn-modal-save" id="btnRuleSave" onclick="saveRuleFromForm()">Add rule</button>
+                        <button type="button" class="btn-modal-cancel" id="btnRuleCancel" onclick="resetRuleForm()" hidden>Cancel</button>
+                    </div>
                 </div>
                 <div class="rules-toolbar">
-                    <div class="segmented-toggle" id="ruleOriginToggle">
-                        <button class="segmented-btn active" data-action="all" onclick="setRuleFilter('all')">All</button>
-                        <button class="segmented-btn" data-action="envelope" onclick="setRuleFilter('envelope')">Spending</button>
-                        <button class="segmented-btn" data-action="payee" onclick="setRuleFilter('payee')">Rename</button>
-                        <button class="segmented-btn" data-action="exclude" onclick="setRuleFilter('exclude')">Exclude</button>
-                        <button class="segmented-btn" data-action="income" onclick="setRuleFilter('income')">Income &amp; refunds</button>
-                        <button class="segmented-btn" data-action="include" onclick="setRuleFilter('include')">Keep</button>
+                    <div class="segmented-toggle" id="ruleFilterToggle">
+                        <button class="segmented-btn active" data-filter="all" onclick="setRuleFilter('all')">All</button>
+                        <button class="segmented-btn" data-filter="rename" onclick="setRuleFilter('rename')">Renames</button>
+                        <button class="segmented-btn" data-filter="envelope" onclick="setRuleFilter('envelope')">Envelopes</button>
+                        <button class="segmented-btn" data-filter="kind" onclick="setRuleFilter('kind')">Kinds</button>
+                        <button class="segmented-btn" data-filter="attention" onclick="setRuleFilter('attention')">Needs attention <span id="ruleAttentionCount"></span></button>
                     </div>
                     <input type="text" id="ruleSearch" class="input-text" placeholder="Search rules&hellip;" oninput="renderImportRules()">
                 </div>
@@ -1810,11 +1823,11 @@
                     <table class="txn-table">
                         <thead>
                             <tr>
-                                <th>Looks for</th>
-                                <th style="width: 150px;">Applies to</th>
+                                <th style="width: 44px; text-align: right;" title="Rules run from 1 down">#</th>
+                                <th>Rule</th>
                                 <th>Does</th>
-                                <th style="width: 70px; text-align: center;">On</th>
-                                <th style="width: 120px;"></th>
+                                <th style="width: 56px; text-align: center;">On</th>
+                                <th style="width: 190px;">Order</th>
                             </tr>
                         </thead>
                         <tbody id="rulesBody"></tbody>
@@ -1822,14 +1835,14 @@
                 </div>
             </div>
             <div class="modal-footer">
-                <div class="modal-footer-msg" id="rulesFooterMsg">Changes apply to future imports. Use "Re-run rules" to apply them to saved transactions.</div>
+                <div class="modal-footer-msg" id="rulesFooterMsg">Changes apply to future imports. Saving a rule offers to apply it to saved transactions too; "Re-run rules" re-checks everything.</div>
                 <button type="button" class="btn-modal-save" onclick="closeImportRulesModal()">Done</button>
             </div>
         </div>
     </div>
 
     <!-- Re-run rules -->
-    <div class="modal-overlay" id="reclassifyModalOverlay" onclick="if (event.target === this) closeReclassifyModal()">
+    <div class="modal-overlay" id="reclassifyModalOverlay">
         <div class="modal-container wide" role="dialog" aria-modal="true">
             <div class="modal-header">
                 <div class="modal-title-wrap">
@@ -1904,7 +1917,7 @@
 
 
     <!-- Automatic bills on a card -->
-    <div class="modal-overlay" id="cardBillsModalOverlay" onclick="if (event.target === this) closeCardBillsModal()">
+    <div class="modal-overlay" id="cardBillsModalOverlay">
         <div class="modal-container wide" role="dialog" aria-modal="true">
             <div class="modal-header">
                 <div class="modal-title-wrap">
@@ -1954,29 +1967,6 @@
             <div class="modal-footer">
                 <div class="modal-footer-msg">Found from your imported charges, so a bill that hasn't charged yet, or is paid another way, won't appear.</div>
                 <button type="button" class="btn-modal-save" onclick="closeCardBillsModal()">Done</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Asks who a new rule applies to -->
-    <div class="modal-overlay" id="scopeModalOverlay" onclick="if (event.target === this) answerRuleScope(null)">
-        <div class="modal-container" role="dialog" aria-modal="true" style="max-width: 460px;">
-            <div class="modal-header">
-                <div class="modal-title-wrap">
-                    <div class="modal-title">Who is this rule for?</div>
-                    <div class="modal-subtitle" id="scopeModalMessage"></div>
-                </div>
-                <button class="modal-close-btn" onclick="answerRuleScope(null)" title="Cancel">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="scope-choice">
-                    <button type="button" onclick="answerRuleScope('personal')">Just me<small>Only this budget uses it, and it wins over shared rules.</small></button>
-                    <button type="button" onclick="answerRuleScope('shared')">Everyone<small>Every budget on this computer uses it. Budgets without the envelope flag the row for review.</small></button>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <div class="modal-footer-msg"></div>
-                <button type="button" class="btn-modal-cancel" onclick="answerRuleScope(null)">Cancel</button>
             </div>
         </div>
     </div>

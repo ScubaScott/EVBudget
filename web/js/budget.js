@@ -8,8 +8,6 @@ let setupStatus = null;
 let billsEnvelopeId = null;
 let budgetLoaded = false;
 
-const KIND_OPTIONS = { spending: 'Spending', bill: 'Bills', savings: 'Savings' };
-
 document.addEventListener('tabchange', (e) => {
     if (e.detail.tab === 'budget') loadBudget();
 });
@@ -64,7 +62,7 @@ function renderBudgetKpis() {
     const people = Object.entries(s.planning_by_person || {}).map(([k, v]) => `${escapeHtml(k)} ${money(v)}`).join(' &bull; ');
     document.getElementById('budgetKpis').innerHTML =
         card('income', 'Income to plan around', money(s.planning_income) + '<span class="kpi-unit"> / month</span>', people || 'Add pay sources on the Income tab') +
-        card('net', 'Budgeted', money(s.total_budgeted) + '<span class="kpi-unit"> / month</span>', 'Spending, bills and savings') +
+        card('net', 'Budgeted', money(s.total_budgeted) + '<span class="kpi-unit"> / month</span>', 'Spending and bills (goals take what is left)') +
         card(s.surplus >= 0 ? 'income' : 'spend', s.surplus >= 0 ? 'Left over' : 'Over budget', money(Math.abs(s.surplus)) + '<span class="kpi-unit"> / month</span>',
             s.surplus >= 0 ? 'Income minus everything budgeted' : 'Budgets add up to more than income') +
         card('count', 'Actually spent', s.actual_avg_spend === null ? '—' : money(s.actual_avg_spend) + '<span class="kpi-unit"> / month</span>', 'Average over recent complete months');
@@ -83,6 +81,7 @@ function renderGoLive() {
 // ---------------------------------------------------------------------
 function suggestionCell(e) {
     const s = budgetData.suggestions[String(e.id)];
+    if (s && s.basis === 'goal') return goalProgressCell(e, s);
     if (!s || s.basis === 'none') return '<span class="import-muted">You choose the monthly amount</span>';
     const conf = s.confidence ? `<span class="conf conf-${s.confidence}">${s.confidence}</span>` : '';
     if (s.basis === 'bills') {
@@ -98,21 +97,38 @@ function suggestionCell(e) {
         `<div class="import-file-sub">${s.months} complete month${s.months === 1 ? '' : 's'} of data</div>`;
 }
 
+// A goal's row: how much is saved and how far is left, instead of a spending suggestion
+function goalProgressCell(e, s) {
+    if (!e.goal) return '<span class="import-muted">Open-ended: add a goal amount to track progress</span>';
+    if (s.saved === null || s.saved === undefined) return '<span class="import-muted">Progress shows once go-live is set up</span>';
+    return s.to_go > 0
+        ? `${money(s.saved)} saved &bull; <strong>${money(s.to_go)}</strong> to go`
+        : `${money(s.saved)} saved &bull; <strong>Goal reached 🎉</strong>`;
+}
+
 function renderBudgetTable() {
     const sel = (opts, cur, field, id) => `<select class="select-input import-mini" onchange="saveEnvelopeField(${id}, '${field}', this.value)">` +
-        Object.entries(opts).map(([k, v]) => `<option value="${k}" ${k === cur ? 'selected' : ''}>${v}</option>`).join('') + '</select>';
-    document.getElementById('budgetBody').innerHTML = budgetData.envelopes.map(e => {
-        const budgetCell = e.budget_derived
+        opts.map(([k, v]) => `<option value="${k}" ${k === cur ? 'selected' : ''}>${v}</option>`).join('') + '</select>';
+    // Grouped by type (Spending, Bills, Goal); inside a type the server's order (A-Z or the owner's) is kept
+    const rank = (e) => ENVELOPE_KINDS.findIndex(([k]) => k === e.kind);
+    const ordered = budgetData.envelopes.map((e, i) => [e, i]).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map(x => x[0]);
+    document.getElementById('budgetBody').innerHTML = ordered.map(e => {
+        const isGoal = e.kind === 'goal';
+        const budgetCell = isGoal
+            ? `<input type="number" step="0.01" min="0" class="input-number import-mini" value="${e.goal || ''}" placeholder="Goal amount" title="The amount you're saving up to" onchange="saveEnvelopeField(${e.id}, 'goal', this.value || null)"><div class="import-file-sub">goal amount</div>`
+            : e.budget_derived
             ? `<div class="derived-budget">${money(e.effective_budget)}</div><div class="import-file-sub">from bills</div>`
             : `<input type="number" step="0.01" min="0" class="input-number import-mini" value="${e.monthly_budget || ''}" placeholder="0" onchange="saveEnvelopeField(${e.id}, 'monthly_budget', this.value || 0)">`;
         const activeBills = e.bills.filter(b => b.active).length;
         const overdue = e.bills.some(b => b.overdue);
+        const billsCell = isGoal && !e.bills.length ? '<span class="import-muted">&mdash;</span>'
+            : `<button type="button" class="btn-inline-action btn-inline-cancel" onclick="openBillsModal(${e.id})">${activeBills ? activeBills + ' bill' + (activeBills === 1 ? '' : 's') : 'Add bills'}</button>${overdue ? ' <span class="kind-badge kind-review">Overdue</span>' : ''}`;
         return `<tr class="${e.active ? '' : 'excluded-row'}">
             <td><div style="font-weight:600;">${escapeHtml(e.name)}</div></td>
-            <td>${sel(KIND_OPTIONS, e.kind, 'kind', e.id)}</td>
+            <td>${sel(ENVELOPE_KINDS, e.kind, 'kind', e.id)}</td>
             <td>${budgetCell}</td>
             <td>${suggestionCell(e)}</td>
-            <td><button type="button" class="btn-inline-action btn-inline-cancel" onclick="openBillsModal(${e.id})">${activeBills ? activeBills + ' bill' + (activeBills === 1 ? '' : 's') : 'Add bills'}</button>${overdue ? ' <span class="kind-badge kind-review">Overdue</span>' : ''}</td>
+            <td>${billsCell}</td>
             <td style="text-align:center;"><input type="checkbox" class="txn-checkbox" ${e.active ? 'checked' : ''} onchange="saveEnvelopeField(${e.id}, 'active', this.checked ? 1 : 0)"></td></tr>`;
     }).join('');
 }
@@ -138,7 +154,7 @@ async function acceptSuggestion(id, amount) {
 
 async function acceptAllSuggestions() {
     const items = budgetData.envelopes
-        .filter(e => e.active && !e.budget_derived && e.kind !== 'savings')
+        .filter(e => e.active && !e.budget_derived && e.kind !== 'goal')
         .map(e => ({ e, s: budgetData.suggestions[String(e.id)] }))
         .filter(({ s }) => s && s.confidence === 'high' && s.suggested > 0)
         .map(({ e, s }) => ({ envelope_id: e.id, amount: s.suggested }));

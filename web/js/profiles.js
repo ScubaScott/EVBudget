@@ -58,23 +58,5 @@ async function removeBudgetPin() {
     }
 }
 
-// ---------------------------------------------------------------------
-// Rule scope: every new rule is either just for this budget or shared with all of them
-// ---------------------------------------------------------------------
-let ruleScopeResolver = null;
-
-// Resolves to 'personal', 'shared', or null if cancelled
-function askRuleScope(message) {
-    document.getElementById('scopeModalMessage').textContent = message;
-    document.getElementById('scopeModalOverlay').classList.add('active');
-    return new Promise(resolve => { ruleScopeResolver = resolve; });
-}
-
-function answerRuleScope(scope) {
-    document.getElementById('scopeModalOverlay').classList.remove('active');
-    if (ruleScopeResolver) ruleScopeResolver(scope);
-    ruleScopeResolver = null;
-}
-
 document.addEventListener('DOMContentLoaded', loadBudgetChip);
 document.addEventListener('settingsopen', refreshPinSection);

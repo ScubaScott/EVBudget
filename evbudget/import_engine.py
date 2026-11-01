@@ -399,6 +399,7 @@ def build_preview(conn: Any, file_infos: List[Dict[str, Any]]) -> Dict[str, Any]
             ctx.expenses.add(r["date"], res["name"], res["envelope"])
         was_deleted = r["txn_id"] in tombstones or (r.get("legacy_id") in tombstones)
         rec = {k: res.get(k) for k in RECORD_FIELDS if k in res}
+        rec.update(rules=res.get("rules") or [], notes=res.get("notes") or [])     # what the preview shows as chips
         rec.update(
             txn_id=r["txn_id"], date=r["date"], raw_name=r["raw_name"], amount=r["amount"],
             check_num=r["check_num"], account_type=r["account_type"], source_file=r["source_file"],
@@ -411,6 +412,7 @@ def build_preview(conn: Any, file_infos: List[Dict[str, Any]]) -> Dict[str, Any]
         if stored_id:
             e = existing[stored_id]
             rec = {k: e.get(k) for k in RECORD_FIELDS}
+            rec.update(rules=[], notes=[])
             rec.update(
                 is_included=bool(e.get("is_included")), status="existing", edited=False,
                 seen_in_file=r["source_file"], account_name=e.get("account_name") or r["account_name"],
@@ -583,7 +585,7 @@ def lookup_vendor_online(vendor_query: str) -> Dict[str, Any]:
             (["restaurant", "food", "cafe", "grill", "bakery", "bar", "pizza", "dining"], "Restaurant", "High"),
             (["gas station", "fuel", "petroleum", "convenience store"], "Gas", "High"),
             (["supermarket", "grocery", "produce", "meat market"], "Groceries", "High"),
-            (["software", "streaming", "subscription", "cloud", "telecom"], "Bills: Subscriptions", "Medium"),
+            (["software", "streaming", "subscription", "cloud", "telecom"], "Subscriptions", "Medium"),
             (["utility", "electric", "power", "water", "waste", "sanitation"], "Bills: Every Month", "High"),
             (["clinic", "dental", "ortho", "medical", "hospital", "doctor"], "Bills: One Time", "Medium"),
         ]

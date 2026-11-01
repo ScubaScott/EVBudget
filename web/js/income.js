@@ -4,27 +4,18 @@ let incomeData = null;
 let incomeSources = [];
 let incomePlanning = null;
 let incomePeople = [];
-let incomePreset = 'ytd';
 let incomeLoaded = false;
 let chartIncomeMonthly = null;
 let chartIncomeTrend = null;
 let chartIncomeVsSpend = null;
 let sourcePreviewTimer = null;
 
-const INCOME_PRESETS = {
-    ytd: 'Year to date', this_year: 'This year', last_12: 'Last 12 months', last_year: 'Last year', all_time: 'All time'
-};
 const FREQ_LABELS = { weekly: 'week', monthly: 'month', yearly: 'year', once: 'once' };
 
 document.addEventListener('tabchange', (e) => {
     if (e.detail.tab === 'income') {
-        if (!incomeLoaded) {
-            incomeLoaded = true;
-            renderIncomePresets();
-            applyIncomePreset('ytd');
-        } else {
-            loadIncome();
-        }
+        incomeLoaded = true;
+        loadIncome();
     }
 });
 document.addEventListener('themechange', () => { if (incomeData) renderIncomeCharts(); });
@@ -36,46 +27,35 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ---------------------------------------------------------------------
-// Timeframe
+// Filters: the Income tab uses the same filter bar as Spending. Its dates pick the range for the charts;
+// every filter (search, kind, person, ...) applies to the transaction list at the bottom.
 // ---------------------------------------------------------------------
-function renderIncomePresets() {
-    document.getElementById('incomePresets').innerHTML =
-        '<span class="control-label">Timeframe:</span>' +
-        Object.entries(INCOME_PRESETS).map(([k, label]) =>
-            `<button type="button" class="preset-btn ${k === incomePreset ? 'active' : ''}" data-preset="${k}" onclick="applyIncomePreset('${k}')">${label}</button>`).join('');
-}
+let incomeRangeLoaded = '';
 
-function applyIncomePreset(key) {
-    incomePreset = key;
-    const today = new Date();
-    let start, end = today;
-    if (key === 'ytd') start = new Date(today.getFullYear(), 0, 1);
-    else if (key === 'this_year') { start = new Date(today.getFullYear(), 0, 1); end = new Date(today.getFullYear(), 11, 31); }
-    else if (key === 'last_year') { start = new Date(today.getFullYear() - 1, 0, 1); end = new Date(today.getFullYear() - 1, 11, 31); }
-    else if (key === 'last_12') { start = new Date(today.getFullYear(), today.getMonth() - 11, 1); }
-    else start = null;
-    if (!start) {
+function incomeRange() {
+    let from = document.getElementById('filterStartDate').value;
+    let to = document.getElementById('filterEndDate').value;
+    if (!from) {   // "All time" leaves the dates blank: start at the first transaction
         const dates = allTransactions.map(t => t.date).sort();
-        start = dates.length ? parseTxnDate(dates[0]) : new Date(today.getFullYear(), 0, 1);
+        from = dates.length ? dates[0] : `${new Date().getFullYear()}-01-01`;
     }
-    document.getElementById('incomeStart').value = toInputDateFormat(start);
-    document.getElementById('incomeEnd').value = toInputDateFormat(end);
-    renderIncomePresets();
-    loadIncome();
+    return { from, to: to || toInputDateFormat(new Date()) };
 }
 
-function onIncomeDatesChange() {
-    incomePreset = 'custom';
-    renderIncomePresets();
-    loadIncome();
-}
+document.addEventListener('filterschanged', () => {
+    if (!incomeLoaded || activeTab !== 'income') return;
+    incomeTxnLimit = 100;
+    const r = incomeRange();
+    if (`${r.from}|${r.to}` !== incomeRangeLoaded) loadIncome();   // new dates: charts need fresh numbers
+    else renderIncomeTxns();
+});
 
 // ---------------------------------------------------------------------
 // Load and render
 // ---------------------------------------------------------------------
 async function loadIncome() {
-    const from = document.getElementById('incomeStart').value;
-    const to = document.getElementById('incomeEnd').value;
+    const { from, to } = incomeRange();
+    incomeRangeLoaded = `${from}|${to}`;
     try {
         const [summary, sources, people] = await Promise.all([
             api(`/api/income/summary?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
@@ -437,12 +417,9 @@ function incomeTxnType(t) {
 }
 
 function renderIncomeTxns() {
-    const from = document.getElementById('incomeStart').value;
-    const to = document.getElementById('incomeEnd').value;
-    const rows = allTransactions.filter(t =>
-        t.is_included === 1 && INCOME_KINDS.includes(t.txn_kind) &&
-        (!from || t.date >= from) && (!to || t.date <= to) &&
-        (incomeTxnFilter === 'all' || t.txn_kind === incomeTxnFilter));
+    // filteredTransactions already has the dates, search, kind, person, envelope and inclusion filters applied
+    const rows = filteredTransactions.filter(t =>
+        INCOME_KINDS.includes(t.txn_kind) && (incomeTxnFilter === 'all' || t.txn_kind === incomeTxnFilter));
     const key = { date: t => t.date, name: t => (t.name || '').toLowerCase(), person: t => personName(t.person_id).toLowerCase(),
         type: t => incomeTxnType(t).toLowerCase(), amount: t => t.amount }[incomeTxnSort.col];
     const dir = incomeTxnSort.asc ? 1 : -1;
@@ -454,7 +431,7 @@ function renderIncomeTxns() {
 
     const shown = rows.slice(0, incomeTxnLimit);
     document.getElementById('incomeTxnBody').innerHTML = shown.length === 0
-        ? '<tr><td colspan="5" class="import-more">No income in this timeframe.</td></tr>'
+        ? '<tr><td colspan="5" class="import-more">No income matches the filters.</td></tr>'
         : shown.map(t => `<tr data-id="${escapeHtml(t.txn_id)}" onclick="openEditModal(this.dataset.id)">
             <td style="white-space:nowrap;">${escapeHtml(formatDisplayDate(t.date))}</td>
             <td><div style="font-weight:500;">${escapeHtml(t.name)}</div>${t.raw_name && t.raw_name !== t.name ? `<div style="font-size:11px;color:var(--text-dim);">${escapeHtml(t.raw_name)}</div>` : ''}</td>

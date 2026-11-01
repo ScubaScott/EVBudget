@@ -18,7 +18,7 @@ class P5Case(TempAppCase):
         finally:
             c.close()
 
-    def pay_series(self, name, dates, amounts, envelope="Bills: Subscriptions"):
+    def pay_series(self, name, dates, amounts, envelope="Subscriptions"):
         for i, d in enumerate(dates):
             amt = amounts[i] if isinstance(amounts, list) else amounts
             self.add_txn(date=d, amount=-amt, name=name, raw_name=name, envelope=envelope)
@@ -38,7 +38,7 @@ class DiscoveryTests(P5Case):
         self.assertEqual(len(found), 1)
         c = found[0]
         self.assertEqual((c["freq"], c["interval"], c["amount"], c["payments"], c["envelope"], c["confidence"]),
-                         ("monthly", 1, 15.49, 5, "Bills: Subscriptions", "high"))
+                         ("monthly", 1, 15.49, 5, "Subscriptions", "high"))
         self.assertEqual(c["next_due"], "2026-11-03")
 
     def test_other_schedules_weekly_biweekly_semiannual_yearly(self):
@@ -63,7 +63,7 @@ class DiscoveryTests(P5Case):
         self.pay_series("SPOTIFY", ["2026-07-05", "2026-08-05", "2026-09-05", "2026-10-05"], 11.99)
         self.pay_series("HULU", ["2026-07-07", "2026-08-07", "2026-09-07", "2026-10-07"], 9.99)
         self.assertEqual(sorted(c["name"] for c in self.discover()), ["HULU", "SPOTIFY"])
-        self.call(self.app.save_bill, {"envelope_id": self.eid("Bills: Subscriptions"), "name": "Music", "match_phrase": "SPOTIFY",
+        self.call(self.app.save_bill, {"envelope_id": self.eid("Subscriptions"), "name": "Music", "match_phrase": "SPOTIFY",
                                        "amount": 11.99, "freq": "monthly", "interval": 1, "anchor_date": "2026-10-05"})
         self.assertEqual([c["name"] for c in self.discover()], ["HULU"])
         self.call(self.app.dismiss_bill_candidate, {"key": "HULU"})

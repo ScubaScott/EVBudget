@@ -10,7 +10,7 @@ from email.parser import BytesParser
 from email.policy import HTTP as HTTP_POLICY
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import VERSION, audit, billmatch, budget, cardbills, cards, import_engine, ledger, income, paths, recurrence, reclassify, rules, store
+from . import VERSION, audit, billmatch, budget, cardbills, cards, import_engine, ledger, income, paths, recurrence, reclassify, rule_engine, rules, store
 from . import profiles as profiles_mod
 from . import envelopes as env_mod
 from .http_util import HttpError, Request, Response, Router
@@ -61,15 +61,15 @@ def parse_multipart(content_type: str, body: bytes) -> List[Tuple[str, bytes]]:
 def _envelope_names(conn: Any) -> List[str]:
     return [
         r[0] for r in conn.execute(
-            "SELECT name FROM envelopes WHERE kind != 'system' AND active = 1 ORDER BY sort_order, id"
+            "SELECT name FROM envelopes WHERE kind != 'system' AND active = 1 ORDER BY " + env_mod.ORDER_SQL + ", id"
         )
     ]
 
 
 def _envelope_kinds(conn: Any) -> Dict[str, Dict[str, Any]]:
     return {
-        r["name"]: {"id": r["id"], "kind": r["kind"]} for r in conn.execute(
-            "SELECT id, name, kind FROM envelopes WHERE kind != 'system' AND active = 1")
+        r["name"]: {"id": r["id"], "kind": r["kind"], "manual": r["sort_order"] > 0} for r in conn.execute(
+            "SELECT id, name, kind, sort_order FROM envelopes WHERE kind != 'system' AND active = 1")
     }
 
 
@@ -520,7 +520,7 @@ class App:
             rule_saved = False
             phrase = str(data.get("rule_phrase") or "").strip()
             if data.get("save_rule") and phrase:
-                save_user_rules_from_bulk(conn, phrase, updates, kind, included, self._choose_scope(conn, data.get("rule_scope")))
+                save_user_rules_from_bulk(conn, phrase, updates, kind, included)
                 rule_saved = True
             conn.commit()
         finally:
@@ -590,7 +590,7 @@ class App:
             if kind != "spending":
                 guess["rollover_mode"] = "rollover"
             guess["kind"] = kind
-            order = conn.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM envelopes").fetchone()[0]
+            order = env_mod.next_order(conn, guess["kind"])
             conn.execute(
                 "INSERT INTO envelopes (name, kind, rollover_mode, sort_order) VALUES (?, ?, ?, ?)",
                 (name, guess["kind"], guess["rollover_mode"], order),
@@ -618,7 +618,8 @@ class App:
                 "UPDATE transactions SET envelope = ?, updated_at = ? WHERE LOWER(TRIM(envelope)) = LOWER(?)",
                 (new, datetime.now().isoformat(), old),
             )
-            conn.execute("UPDATE rules SET set_envelope = ? WHERE LOWER(set_envelope) = LOWER(?)", (new, old))
+            for table in _rule_tables(conn):
+                conn.execute(f"UPDATE {table} SET set_envelope = ? WHERE LOWER(set_envelope) = LOWER(?)", (new, old))
             conn.commit()
             result = {"success": True, "old_name": old, "new_name": new, "renamed_count": cur.rowcount,
                       "envelopes": _envelope_names(conn), "kinds": _envelope_kinds(conn)}
@@ -651,10 +652,14 @@ class App:
                 "UPDATE transactions SET envelope = ?, updated_at = ? WHERE LOWER(TRIM(envelope)) = LOWER(?)",
                 (reassign_to, datetime.now().isoformat(), name),
             )
-            if reassign_to:
-                conn.execute("UPDATE rules SET set_envelope = ? WHERE LOWER(set_envelope) = LOWER(?)", (reassign_to, name))
-            else:
-                conn.execute("UPDATE rules SET active = 0 WHERE LOWER(set_envelope) = LOWER(?)", (name,))
+            for table in _rule_tables(conn):
+                if reassign_to:
+                    conn.execute(f"UPDATE {table} SET set_envelope = ? WHERE LOWER(set_envelope) = LOWER(?)", (reassign_to, name))
+                else:
+                    # Take the envelope out of those rules; one that has nothing else to do is switched off
+                    conn.execute(f"UPDATE {table} SET set_envelope = NULL WHERE LOWER(set_envelope) = LOWER(?)", (name,))
+                    conn.execute(f"UPDATE {table} SET active = 0 WHERE set_envelope IS NULL AND set_payee IS NULL "
+                                 "AND set_kind IS NULL AND set_needs_review = 0")
             conn.commit()
             result = {"success": True, "envelope": name, "reassigned_count": cur.rowcount,
                       "reassigned_to": reassign_to, "envelopes": _envelope_names(conn), "kinds": _envelope_kinds(conn)}
@@ -665,139 +670,180 @@ class App:
 
     # ------------------------------------------------------------------ rules
 
-    def get_rules(self, req: Request) -> Any:
-        conn = self.conn()
-        try:
-            rows = [dict(r, scope="personal") for r in conn.execute("SELECT * FROM rules")]
-            shared = store.has_shared(conn)
-            if shared:
-                rows += [dict(r, scope="shared") for r in conn.execute("SELECT * FROM shared.rules")]
-            rows.sort(key=lambda r: (r["stage"], r["scope"] == "shared", r["priority"], r["id"]))
-            return {"rules": rows, "stages": list(rules.STAGES), "kinds": list(rules.KINDS), "has_shared": shared}
-        finally:
-            conn.close()
-
     @staticmethod
     def _rule_table(rule_id: int) -> str:
         """Which store a rule is in follows from its ID (see store.SHARED_ID_BASE)."""
         return "shared.rules" if int(rule_id) >= store.SHARED_ID_BASE else "rules"
 
+    def get_rules(self, req: Request) -> Any:
+        conn = self.conn()
+        try:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM rules")]
+            if store.has_shared(conn):
+                rows += [dict(r) for r in conn.execute("SELECT * FROM shared.rules")]
+            rows.sort(key=lambda r: (r["priority"], r["id"]))
+            envelopes = [r[0] for r in conn.execute("SELECT name FROM envelopes WHERE kind != 'system' AND active = 1 ORDER BY " + env_mod.ORDER_SQL + ", id")]
+            known = {e.lower() for e in envelopes}
+            for r in rows:
+                env = (r.get("set_envelope") or "").strip()
+                r["problem"] = f"There is no envelope called '{env}'" if env and env.lower() not in known else ""
+            return {"rules": rows, "kinds": list(rules.KINDS), "envelopes": envelopes}
+        finally:
+            conn.close()
+
     @staticmethod
-    def _choose_scope(conn: Any, scope: Any) -> str:
-        """The scope for a new rule. Where rules can be shared the person must say which; there is no default."""
-        if not store.has_shared(conn):
-            return "personal"
-        if scope not in ("personal", "shared"):
-            raise HttpError(400, "Choose whether this rule is just for you or for everyone.")
-        return scope
+    def _rule_fields(data: Dict[str, Any]) -> Dict[str, Any]:
+        """A rule as sent by the editor, checked. Raises HttpError(400) with a plain reason."""
+        def text(key: str) -> Optional[str]:
+            return str(data.get(key) or "").strip() or None
+
+        ftype = data.get("filter_type") or "text"
+        fields = {
+            "filter_type": ftype,
+            "phrase": (text("phrase") or "") if ftype == "text" else "",
+            "match_mode": data.get("match_mode") or "contains",
+            "direction": data.get("direction") or "any",
+            "set_payee": text("set_payee"), "set_envelope": text("set_envelope"), "set_kind": text("set_kind"),
+            "set_income_label": text("set_income_label"), "exclusion_reason": text("exclusion_reason"),
+            "set_needs_review": 1 if data.get("set_needs_review") else 0,
+        }
+        fields["name"] = (text("name") or fields["set_payee"] or fields["phrase"] or "")[:80]
+        try:
+            rule_engine.validate_rule(fields)
+        except ValueError as exc:
+            raise HttpError(400, str(exc))
+        return fields
 
     def save_rule(self, req: Request) -> Any:
         data = req.json()
-        phrase = str(data.get("phrase", "")).strip()
-        stage = data.get("stage") or "envelope"
-        if not phrase:
-            raise HttpError(400, "Rule phrase is required")
-        if stage not in rules.STAGES:
-            raise HttpError(400, f"Unknown stage '{stage}'")
-        mode = data.get("match_mode") or "contains"
-        if mode not in rules.MATCH_MODES:
-            raise HttpError(400, f"Unknown match mode '{mode}'")
-        kind = data.get("set_kind") or None
-        if kind and kind not in rules.KINDS:
-            raise HttpError(400, f"Unknown kind '{kind}'")
-        if mode == "regex":
-            try:
-                rules.check_rename_rule(phrase, (data.get("set_payee") or "").strip())
-            except ValueError as exc:
-                raise HttpError(400, str(exc))
-        fields = {
-            "phrase": phrase, "match_mode": mode, "stage": stage, "set_kind": kind,
-            "set_envelope": (data.get("set_envelope") or "").strip() or None,
-            "set_payee": (data.get("set_payee") or "").strip() or None,
-            "set_income_label": (data.get("set_income_label") or "").strip() or None,
-            "set_needs_review": 1 if data.get("set_needs_review") else 0,
-            "exclusion_reason": (data.get("exclusion_reason") or "").strip() or None,
-            "description": (data.get("description") or "").strip()[:120] or None,
-        }
+        fields = self._rule_fields(data)
         conn = self.conn()
         try:
             rule_id = data.get("id")
             if not rule_id:
-                rule_id = save_user_rule(conn, dict(fields, scope=self._choose_scope(conn, data.get("scope"))))
+                table = "shared.rules" if store.has_shared(conn) else "rules"
+                low = conn.execute(f"SELECT MIN(priority) FROM {table}").fetchone()[0]
+                fields["priority"] = (low if low is not None else 10) - 10      # new rules run first
+                rule_id = store.insert_rule(conn, fields, shared=table == "shared.rules", table=table)
             else:
                 table = self._rule_table(rule_id)
-                current = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (int(rule_id),)).fetchone()
-                if current is None:
+                if conn.execute(f"SELECT 1 FROM {table} WHERE id = ?", (int(rule_id),)).fetchone() is None:
                     raise HttpError(404, "Rule not found")
                 active = 0 if data.get("active") in (0, False) else 1
-                scope = data.get("scope")
-                if scope in ("personal", "shared") and store.has_shared(conn) and (scope == "shared") != (table == "shared.rules"):
-                    # Changing who a rule applies to moves it to the other store, keeping its place in the order.
-                    moved = dict(current, **fields, active=active)
-                    conn.execute(f"DELETE FROM {table} WHERE id = ?", (int(rule_id),))
-                    shared = scope == "shared"
-                    rule_id = store.insert_rule(conn, moved, shared=shared, table="shared.rules" if shared else "rules")
-                else:
-                    conn.execute(
-                        f"""UPDATE {table} SET phrase=:phrase, match_mode=:match_mode, stage=:stage, set_kind=:set_kind,
-                                  set_envelope=:set_envelope, set_payee=:set_payee, set_income_label=:set_income_label,
-                                  set_needs_review=:set_needs_review, exclusion_reason=:exclusion_reason,
-                                  description=:description, active=:active WHERE id=:id""",
-                        dict(fields, id=int(rule_id), active=active),
-                    )
+                conn.execute(
+                    f"""UPDATE {table} SET name=:name, label=:name, filter_type=:filter_type, phrase=:phrase, match_mode=:match_mode,
+                              direction=:direction, set_payee=:set_payee, set_envelope=:set_envelope, set_kind=:set_kind,
+                              set_income_label=:set_income_label, exclusion_reason=:exclusion_reason,
+                              set_needs_review=:set_needs_review, active=:active WHERE id=:id""",
+                    dict(fields, id=int(rule_id), active=active),
+                )
             conn.commit()
             return {"success": True, "id": rule_id}
         finally:
             conn.close()
 
-    def _rename_rule_from(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        rule = {"phrase": str(data.get("phrase") or "").strip(), "match_mode": data.get("match_mode") or "contains",
-                "set_payee": str(data.get("set_payee") or "").strip()}
-        if not rule["phrase"] or not rule["set_payee"]:
-            raise HttpError(400, "Enter the text to look for and the new name")
-        if rule["match_mode"] == "regex":
-            try:
-                rules.check_rename_rule(rule["phrase"], rule["set_payee"])
-            except ValueError as exc:
-                raise HttpError(400, str(exc))
-        return rule
+    def learn_rule(self, req: Request) -> Any:
+        """'Always do this': add to the rule that already looks for this text, or start one."""
+        data = req.json()
+        phrase = str(data.get("phrase") or "").strip()
+        if not phrase:
+            raise HttpError(400, "Enter the text to look for")
+        conn = self.conn()
+        try:
+            rule_id = learn_rule(conn, phrase, envelope=str(data.get("envelope") or "").strip() or None,
+                                 payee=str(data.get("payee") or "").strip() or None)
+            conn.commit()
+            return {"success": True, "id": rule_id}
+        finally:
+            conn.close()
 
-    def _renames(self, conn: Any, rule: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def move_rule(self, req: Request) -> Any:
+        """Change where a rule sits in the order. `to` is top, bottom, up or down."""
+        data = req.json()
+        to = data.get("to")
+        if to not in ("top", "bottom", "up", "down"):
+            raise HttpError(400, "Choose top, bottom, up or down")
+        conn = self.conn()
+        try:
+            rule_id = int(data.get("id") or 0)
+            table = self._rule_table(rule_id)
+            ids = [r[0] for r in conn.execute(f"SELECT id FROM {table} ORDER BY priority, id")]
+            if rule_id not in ids:
+                raise HttpError(404, "Rule not found")
+            i = ids.index(rule_id)
+            ids.pop(i)
+            j = {"top": 0, "bottom": len(ids), "up": max(0, i - 1), "down": min(len(ids), i + 1)}[to]
+            ids.insert(j, rule_id)
+            for pos, rid in enumerate(ids, 1):
+                conn.execute(f"UPDATE {table} SET priority = ? WHERE id = ?", (pos * 10, rid))
+            conn.commit()
+            return {"success": True}
+        finally:
+            conn.close()
+
+    def _matching(self, conn: Any, rule: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Saved transactions a rule would act on, with what it would change."""
         out = []
-        for r in conn.execute("SELECT txn_id, name, raw_name, user_modified FROM transactions"):
+        for r in conn.execute("SELECT txn_id, name, raw_name, amount, envelope, check_num, txn_kind, user_modified, needs_review FROM transactions"):
             hay = " ".join((r["raw_name"] or "").upper().split())
-            new = rules.rename_for(rule, hay, r["name"] or "")
-            if new is not None and new != r["name"]:
-                out.append({"txn_id": r["txn_id"], "before": r["name"], "after": new, "locked": bool(r["user_modified"])})
+            name = r["name"] or ""
+            if not rule_engine.RuleBook._applies(rule, (hay, name.upper()), float(r["amount"]), r["check_num"] or "", ""):
+                continue
+            new_name = rules.rename_for(rule, hay, name) if rule.get("set_payee") and rule["filter_type"] == "text" else None
+            new_env = rule.get("set_envelope") if r["txn_kind"] in ("expense", "refund") else None
+            out.append({
+                "txn_id": r["txn_id"], "name": name, "locked": bool(r["user_modified"]),
+                "after_name": new_name if new_name and new_name != name else None,
+                "envelope": r["envelope"] or "",
+                "after_envelope": new_env if new_env and new_env.lower() != (r["envelope"] or "").lower() else None,
+                "flag": bool(rule.get("set_needs_review")) and not r["needs_review"],
+            })
         return out
 
     def rule_preview(self, req: Request) -> Any:
-        """What a rename rule would do to the transactions already saved."""
-        rule = self._rename_rule_from(req.json())
+        """How many saved transactions a rule being edited matches, and a few examples of what it would change."""
+        try:
+            rule = self._rule_fields(req.json())
+        except HttpError as exc:
+            return {"count": None, "message": exc.message if hasattr(exc, "message") else str(exc)}
 
         def work(c):
-            changes = self._renames(c, rule)
-            open_ = [x for x in changes if not x["locked"]]
+            hits = self._matching(c, rule)
+            changes = [h for h in hits if h["after_name"] or h["after_envelope"] or h["flag"]]
             seen, examples = set(), []
-            for x in open_:
-                if (x["before"], x["after"]) not in seen and len(examples) < 8:
-                    seen.add((x["before"], x["after"]))
-                    examples.append({"before": x["before"], "after": x["after"]})
-            return {"count": len(open_), "locked": len(changes) - len(open_), "examples": examples}
+            for h in changes:
+                if h["locked"]:
+                    continue
+                key = (h["name"], h["after_name"], h["after_envelope"])
+                if key not in seen and len(examples) < 6:
+                    seen.add(key)
+                    examples.append({k: h[k] for k in ("name", "after_name", "envelope", "after_envelope")})
+            return {"count": len(hits), "would_change": len([h for h in changes if not h["locked"]]),
+                    "locked": len([h for h in changes if h["locked"]]), "examples": examples}
         return self._run(work)
 
-    def rule_apply_rename(self, req: Request) -> Any:
-        """Rename saved transactions with this rule, skipping ones you edited by hand."""
-        rule = self._rename_rule_from(req.json())
+    def rule_apply(self, req: Request) -> Any:
+        """Apply a rule's rename, envelope and review flag to the saved transactions it matches, leaving ones you edited by hand."""
+        rule = self._rule_fields(req.json())
 
         def work(c):
             now = datetime.now().isoformat()
             n = 0
-            for x in self._renames(c, rule):
-                if not x["locked"]:
-                    c.execute("UPDATE transactions SET name = ?, updated_at = ? WHERE txn_id = ?", (x["after"], now, x["txn_id"]))
-                    n += 1
-            return {"success": True, "renamed": n}
+            for h in self._matching(c, rule):
+                if h["locked"] or not (h["after_name"] or h["after_envelope"] or h["flag"]):
+                    continue
+                sets, params = ["updated_at = ?"], [now]
+                if h["after_name"]:
+                    sets.append("name = ?")
+                    params.append(h["after_name"])
+                if h["after_envelope"]:
+                    sets.append("envelope = ?")
+                    params.append(h["after_envelope"])
+                if h["flag"]:
+                    sets.append("needs_review = 1")
+                c.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE txn_id = ?", params + [h["txn_id"]])
+                n += 1
+            return {"success": True, "changed": n}
         out = self._run(work)
         self.sync_csv()
         return out
@@ -1110,6 +1156,14 @@ class App:
             return data
         return self._run(work)
 
+    def reorder_envelopes(self, req: Request) -> Any:
+        data = req.json()
+
+        def work(c: Any) -> Dict[str, Any]:
+            env_mod.reorder(c, str(data.get("kind") or ""), data.get("names"), bool(data.get("reset")))
+            return {"success": True, "envelopes": _envelope_names(c), "kinds": _envelope_kinds(c)}
+        return self._run(work)
+
     def save_envelope_settings(self, req: Request) -> Any:
         return self._run(lambda c: (env_mod.save_envelope(c, req.json()), {"success": True})[1])
 
@@ -1412,6 +1466,7 @@ class App:
         r.add("GET", "/api/budget/envelopes", self.budget_envelopes)
         r.add("POST", "/api/budget/accept", self.accept_budget)
         r.add("POST", "/api/envelopes/save", self.save_envelope_settings)
+        r.add("POST", "/api/envelopes/reorder", self.reorder_envelopes)
         r.add("GET", "/api/bills", self.get_bills)
         r.add("POST", "/api/bills/save", self.save_bill)
         r.add("POST", "/api/bills/delete", self.delete_bill)
@@ -1459,7 +1514,9 @@ class App:
         r.add("POST", "/api/rules/save", self.save_rule)
         r.add("POST", "/api/rules/delete", self.delete_rule)
         r.add("POST", "/api/rules/preview", self.rule_preview)
-        r.add("POST", "/api/rules/apply-rename", self.rule_apply_rename)
+        r.add("POST", "/api/rules/apply", self.rule_apply)
+        r.add("POST", "/api/rules/move", self.move_rule)
+        r.add("POST", "/api/rules/learn", self.learn_rule)
         r.add("GET", "/api/import/scan", self.import_scan)
         r.add("POST", "/api/import/upload", self.import_upload)
         r.add("POST", "/api/import/inspect", self.import_inspect)
@@ -1475,58 +1532,59 @@ class App:
 # ---------------------------------------------------------------------------
 
 
-def save_user_rule(conn: Any, fields: Dict[str, Any]) -> int:
-    """Add a user rule, or update the user rule with the same phrase and stage.
+def _rule_tables(conn: Any) -> List[str]:
+    return ["rules", "shared.rules"] if store.has_shared(conn) else ["rules"]
 
-    fields["scope"] is "shared" (everyone's rules) or "personal" (this budget only; the default).
-    New rules go ahead of older ones so a more specific, newer rule wins.
+
+def learn_rule(
+    conn: Any, phrase: str, *, direction: str = "any", payee: Optional[str] = None, envelope: Optional[str] = None,
+    kind: Optional[str] = None, exclusion_reason: Optional[str] = None, income_label: Optional[str] = None,
+) -> int:
+    """Teach the rules something about `phrase`.
+
+    If a rule already looks for exactly this text (in the same direction, and either setting a kind or not), the new
+    actions are added to it, so one filter never needs two rules. Otherwise a new rule goes to the top of the list.
     """
-    shared = fields.get("scope") == "shared"
-    table = "shared.rules" if shared else "rules"
-    existing = conn.execute(
-        f"SELECT id FROM {table} WHERE origin = 'user' AND stage = ? AND UPPER(phrase) = UPPER(?)",
-        (fields["stage"], fields["phrase"]),
+    table = "shared.rules" if store.has_shared(conn) else "rules"
+    row = conn.execute(
+        f"""SELECT id FROM {table} WHERE filter_type = 'text' AND match_mode = 'contains' AND UPPER(phrase) = UPPER(?)
+                  AND direction = ? AND (set_kind IS NOT NULL) = ? ORDER BY priority, id LIMIT 1""",
+        (phrase, direction, 1 if kind else 0),
     ).fetchone()
-    if existing:
-        conn.execute(
-            f"""UPDATE {table} SET match_mode=?, set_kind=?, set_envelope=?, set_payee=?, set_income_label=?,
-                      set_needs_review=?, exclusion_reason=?, description=COALESCE(?, description), active=1 WHERE id=?""",
-            (
-                fields.get("match_mode", "contains"), fields.get("set_kind"), fields.get("set_envelope"),
-                fields.get("set_payee"), fields.get("set_income_label"), int(fields.get("set_needs_review") or 0),
-                fields.get("exclusion_reason"), fields.get("description"), existing["id"],
-            ),
-        )
-        return int(existing["id"])
-    low = conn.execute(f"SELECT MIN(priority) FROM {table} WHERE origin = 'user'").fetchone()[0]
-    rule = {k: v for k, v in fields.items() if k != "scope"}
-    rule["origin"] = "user"
-    rule["priority"] = (low if low is not None else 100) - 1
-    rule["label"] = rule.get("label") or "User Learned Rule"
-    return store.insert_rule(conn, rule, shared=shared, table=table)
+    if row:
+        for column, value in (("set_payee", payee), ("set_envelope", envelope), ("set_kind", kind),
+                              ("exclusion_reason", exclusion_reason), ("set_income_label", income_label)):
+            if value:
+                conn.execute(f"UPDATE {table} SET {column} = ? WHERE id = ?", (value, row["id"]))
+        conn.execute(f"UPDATE {table} SET active = 1 WHERE id = ?", (row["id"],))
+        return int(row["id"])
+    low = conn.execute(f"SELECT MIN(priority) FROM {table}").fetchone()[0]
+    return store.insert_rule(conn, {
+        "name": payee or phrase, "phrase": phrase, "direction": direction, "set_payee": payee, "set_envelope": envelope,
+        "set_kind": kind, "exclusion_reason": exclusion_reason, "set_income_label": income_label,
+        "priority": (low if low is not None else 10) - 10,
+    }, shared=table == "shared.rules", table=table)
 
 
 def save_user_rules_from_bulk(
-    conn: Any, phrase: str, updates: Dict[str, Any], kind: Optional[str], included: Optional[int], scope: str = "personal"
+    conn: Any, phrase: str, updates: Dict[str, Any], kind: Optional[str], included: Optional[int]
 ) -> None:
-    """Turn a bulk edit with 'always do this' into learned rules."""
+    """Turn a bulk edit with 'always do this' into rules."""
     envelope = (updates.get("envelope") or "").strip() or None
     payee = (updates.get("name") or "").strip() or None
     # For refunds and other income the envelope belongs to that rule alone, so spending
     # with the same phrase isn't pulled into it.
     expense_envelope = None if kind in ("refund", "other_income") else envelope
+    reason = (updates.get("exclusion_reason") or "").strip() or None
     if expense_envelope or payee:
-        save_user_rule(conn, {"scope": scope, "phrase": phrase, "stage": "envelope" if expense_envelope else "payee",
-                              "set_envelope": expense_envelope, "set_payee": payee})
+        learn_rule(conn, phrase, payee=payee, envelope=expense_envelope)
     if kind in rules.EXCLUDED_KINDS:
-        save_user_rule(conn, {"scope": scope, "phrase": phrase, "stage": "exclude", "set_kind": kind,
-                              "exclusion_reason": (updates.get("exclusion_reason") or "").strip() or "User Learned Rule"})
+        learn_rule(conn, phrase, kind=kind, exclusion_reason=reason or "User Learned Rule")
     elif kind in ("refund", "other_income"):
-        save_user_rule(conn, {"scope": scope, "phrase": phrase, "stage": "refund" if kind == "refund" else "income", "set_kind": kind,
-                              "set_envelope": envelope if kind == "refund" else None,
-                              "set_income_label": (updates.get("income_label") or "").strip() or None})
+        learn_rule(conn, phrase, direction="in", kind=kind, envelope=envelope if kind == "refund" else None,
+                   income_label=(updates.get("income_label") or "").strip() or None)
     elif included is not None and kind is None:
-        stage = "include_override" if int(included) == 1 else "exclude"
-        save_user_rule(conn, {"scope": scope, "phrase": phrase, "stage": stage, "set_envelope": envelope,
-                              "set_kind": "expense" if stage == "include_override" else None,
-                              "exclusion_reason": (updates.get("exclusion_reason") or "").strip() or "User Learned Rule"})
+        if int(included) == 1:
+            learn_rule(conn, phrase, kind="expense", envelope=envelope)
+        else:
+            learn_rule(conn, phrase, kind="transfer", exclusion_reason=reason or "User Learned Rule")

@@ -6,7 +6,7 @@ from datetime import date
 from typing import Any, Dict, List, Optional
 
 from . import envelopes as env_mod
-from . import income, store
+from . import income, ledger, store
 from .envelopes import ValidationError, to_cents, to_dollars
 
 
@@ -65,15 +65,19 @@ def suggestions(conn: Any, today: Optional[date] = None) -> Dict[str, Any]:
     bill_months = [m for m in bill_months_all if first and m >= first]
     spend_data = _monthly_spend(conn, bill_months_all)
 
+    goal_states = {s["id"]: s for s in ledger.envelope_states(conn, today)["envelopes"] if s["kind"] == "goal"}
+
     result: Dict[str, Any] = {}
     plan_total = 0.0
     for e in env_mod.list_envelopes(conn, today):
         if not e["active"]:
             continue
         by_month = spend_data.get(e["name"].lower(), {})
-        if e["kind"] == "savings":
-            result[str(e["id"])] = {"basis": "none", "suggested": None, "confidence": None}
-            plan_total += e["effective_budget"]
+        if e["kind"] == "goal":
+            # Goals have no monthly amount, so they add nothing to the budgeted total.
+            st = goal_states.get(e["id"], {})
+            result[str(e["id"])] = {"basis": "goal", "suggested": None, "confidence": None,
+                                    "saved": st.get("balance"), "to_go": st.get("to_go")}
             continue
 
         if e["budget_derived"]:

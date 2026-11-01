@@ -20,7 +20,7 @@
 ### Non-goals (out of scope)
 - Bank sync or API connections. Import stays file-based.
 - Splitting one transaction across several envelopes. A later phase could add this; the schema doesn't block it.
-- Tracking balances for multiple accounts (checking, savings, card). Savings is handled with savings envelopes only (§6.6).
+- Tracking balances for multiple accounts (checking, savings, card). Savings is handled with goal envelopes only (§6.6).
 - Multiple users, authentication, or remote access. The server stays bound to `127.0.0.1`.
 - Mobile layout beyond what the existing responsive CSS already gives.
 
@@ -42,7 +42,7 @@
 | D10 | Layout | **Top-level tabs:** Import · Analytics · Envelopes · Budget · Income. |
 | D11 | Templates | **Fixed dollars.** A shortfall shows a warning. The remainder goes to Unallocated. |
 | D12 | Income reports | All four: monthly income by person, paycheck trend per person, income vs budget vs spend, YTD KPI cards. |
-| D13 | Savings | Savings is a **savings envelope kind**, filled through templates. The bank transfer to savings stays **excluded**, so it isn't counted twice. |
+| D13 | Savings | Savings is a **goal envelope kind** (it replaced the old `savings` kind): a target amount with no date. The bank transfer to savings stays **excluded**, so it isn't counted twice. |
 | D14 | Goodbudget export | **Removed.** The converter feeds only the local database. |
 | D15 | Import tool | Becomes the **Import tab** in Phase 1. `Import_transactions.py` and `launch_converter.bat` are retired. |
 | D16 | Envelope transfers | Supported: envelope ↔ envelope and Unallocated ↔ envelope. Every move is logged. |
@@ -190,10 +190,10 @@ Indexes: `(date)`, `(envelope)`, `(txn_kind, date)`, `(income_source_id, date)`,
 |---|---|---|
 | id | INTEGER PK | |
 | name | TEXT UNIQUE | The display name. The dashboard keeps matching `transactions.envelope` by name, and rename updates both (same as today). |
-| kind | TEXT | `spending` · `bill` · `savings` · `system` |
+| kind | TEXT | `spending` · `bill` · `goal` · `system` (old `savings` envelopes are converted to `goal`) |
 | rollover_mode | TEXT | Always `rollover`. Kept only so older databases open; any `reset` value is rewritten on open. |
-| monthly_budget_cents | INTEGER | **Spending:** the budget. **Bill:** derived from bills (read-only in the UI unless the envelope has no bills). **Savings:** the monthly contribution. |
-| goal_cents / goal_date | INTEGER / TEXT NULL | Savings only, optional (§6.5) |
+| monthly_budget_cents | INTEGER | **Spending:** the budget. **Bill:** derived from bills (read-only in the UI unless the envelope has no bills). **Goal:** not used (goals take extra money, not a monthly amount). |
+| goal_cents / goal_date | INTEGER / TEXT NULL | `goal_cents`: goals only, optional (no amount = open-ended). `goal_date` is no longer used and is cleared. |
 | sort_order | INTEGER | |
 | active | INTEGER DEFAULT 1 | Archived envelopes are hidden but keep their history. |
 
@@ -346,12 +346,12 @@ Let *G* be the go-live date and *D* the "as of" date (default: today).
 **Capacity (100% of the bar):**
 - **Spending:** carry-in + the monthly budget. Carry-in is the balance at the start of the month, after the sweep.
 - **Bill:** Σ over active bills of the amount for their next occurrence.
-- **Savings:** `goal_cents` if set. Otherwise the balance plus the monthly contribution.
+- **Goal:** `goal_cents` if set. Otherwise the balance (open-ended).
 
 **"Should have" marker (D6):**
 - **Spending (pacing down):** `marker = carry_in + budget × (1 − f)`, where `f = (day_of_month − 1) / days_in_month`. On day 15 of 30 with a $600 budget and $0 carry-in, the marker is about $320.
 - **Bill (accruing up):** Σ over bills of `amount × f_bill`, where `f_bill = (D − cycle_start) / (next_due − cycle_start)` clamped to [0, 1], and `cycle_start = previous_occurrence(rule, before next_due)`. If the bill is paid early, `next_due` moves forward and its share resets to nearly zero. For a $1,800 semi-annual bill halfway through its cycle, the marker is $900.
-- **Savings:** with a goal and goal date, the marker is a straight line from the go-live (or creation) balance to the goal by the goal date. With no goal, there is no marker.
+- **Goal:** no marker. Status is `saving` below the goal, `reached` at or above it, `open` with no amount, and `overdrawn` below zero; never `behind`.
 
 **Status (for color and sorting):**
 - `overdrawn`: balance < 0
@@ -359,8 +359,8 @@ Let *G* be the go-live date and *D* the "as of" date (default: today).
 - `on_track`: balance ≥ marker × 0.9
 - `funded`: balance ≥ capacity
 
-### 6.6 Savings (D13)
-Savings envelopes (e.g. "Savings: Emergency") are funded through templates like any other envelope. The real bank transfer to savings stays excluded as `transfer`. A "spend" from a savings envelope happens when the user moves money from savings back to Unallocated (a `transfer` move). Real withdrawals from the savings account stay invisible to the system.
+### 6.6 Goals (D13)
+Goal envelopes (e.g. "New car", $15,000) are funded through fills, templates or transfers like any other envelope. Once reached, the bar shows a celebration line and the page throws confetti once per goal amount. The real bank transfer to savings stays excluded as `transfer`. A "spend" from a goal envelope happens when the user moves money from savings back to Unallocated (a `transfer` move). Real withdrawals from the savings account stay invisible to the system.
 
 ### 6.7 Fill workflow
 - **Fill queue:** included paycheck and other_income transactions with date ≥ G and no `confirmed` allocation. The count shows as a badge on the Envelopes tab.
@@ -373,7 +373,7 @@ Savings envelopes (e.g. "Savings: Emergency") are funded through templates like 
   1. Fund `overdrawn` envelopes back to $0, most negative first.
   2. Fund bill envelopes up to their marker, soonest due first.
   3. Fund spending envelopes up to their marker, biggest gap first.
-  4. Fund savings envelopes up to their marker.
+  4. Only if every other active envelope is now full (balance ≥ capacity, not just on track): split what's left evenly across goals still short of their amount.
   5. Leave the rest in Unallocated.
   The suggestion only fills the editable lines. Nothing is committed until the user confirms.
 - **Confirm** creates the allocation and its fill moves in one database transaction.
@@ -395,7 +395,7 @@ For each envelope, use only *complete* calendar months before the current month 
 - **Bill envelopes with bill items:** the suggestion is the sum of each bill's monthly normalized amount (§6.4). Show the 12-month actual average next to it as a check.
 - **Bill envelopes without bill items:** the 12-month total ÷ 12. For example, a $9,779.90 home insurance payment becomes $815/month. Also show a "Create bill from history" shortcut that pre-fills a bill using the last payment's amount, date, and an inferred interval.
 - **Recurring-payee discovery** (Phase 5): a payee with 3 or more payments at a steady interval (±3 days weekly, ±5 days monthly) and an amount within ±15% is offered as a candidate bill.
-- **Budget summary:** planning income vs Σ monthly budgets (spending + bill + savings) → surplus or deficit. Also show the actual average spend.
+- **Budget summary:** planning income vs Σ monthly budgets (spending + bill; goals add nothing) → surplus or deficit. Also show the actual average spend.
 
 ### 6.9 Fill template generation
 **Generate from budget:** for each income source, the source's share = its planning income ÷ total planning income. Each line = envelope monthly budget × share ÷ (the source's periods per year ÷ 12), rounded to whole dollars. The user then edits it. A live summary shows template total vs typical paycheck, then lists the remainder or shortfall.
@@ -481,7 +481,7 @@ The existing page, with JS moved to `js/analytics.js`. Changes:
 ### 8.4 Envelopes tab (Phase 4)
 - **Summary strip:** Unallocated, Total in envelopes, Fill queue (N), Overdrawn (N), Bills due in 7 days (N).
 - **Fullness chart (the main view):**
-  - One horizontal bar per active envelope, grouped as Bills, Spending, Savings.
+  - One horizontal bar per active envelope, grouped as Spending, Bills, Goals.
   - Bar length is the balance as a percent of capacity. It overflows past 100% when funded beyond capacity, and extends left of zero when negative.
   - A vertical **tick** marks where the marker falls.
   - Bars are colored by status.
@@ -708,13 +708,13 @@ Phase 4 is built: live envelope balances, paycheck fills, transfers, bill matchi
 
 - **Backend:** `ledger.py` (balances, month-end sweeps, markers and status, fill queue, allocations, transfers, envelope history) and `billmatch.py`. New endpoints: `/api/envelopes/balances`, `/api/envelopes/ledger`, `/api/bills/upcoming`, `/api/bills/link`, `/api/bills/unlink`, `/api/allocations/queue|draft|suggest|confirm|void`, `/api/moves/transfer|void`.
 - **Balances are never stored.** They are worked out from money moves, spending tagged to the envelope, and income, counting only from go-live. A built-in check confirms every dollar is accounted for (balances = opening money + income − net spending); the tab shows a warning if it ever fails.
-- **Targets:** a spending envelope's "should have" marker counts down through the month (a $600 budget on the 16th of a 30-day month is $300). A bill's marker builds up toward its due date (a $1,800 six-month bill is about $900 at the halfway point). Savings follow a straight line to the goal date.
+- **Targets:** a spending envelope's "should have" marker counts down through the month (a $600 budget on the 16th of a 30-day month is $300). A bill's marker builds up toward its due date (a $1,800 six-month bill is about $900 at the halfway point). Goals have no marker and simply fill toward their amount.
 - **Carry-in** is what an envelope held at the start of the month: earlier months, month-end sweeps, and opening balances. Fills and transfers made during the month are not counted, so they can't inflate the month's target.
 - **Month-end:** "start fresh" envelopes hand any positive leftover to Unallocated on the 1st; "carry over" envelopes keep it; negative balances always carry forward. Each month is swept once, and later edits don't rewrite the past.
-- **Fills:** each paycheck gets a split screen pre-filled from its pay source's template (bonuses and other income start empty). Suggest funds overdrawn envelopes first, then bills (soonest due), spending (biggest gap), then savings. A fill can't take more than Unallocated holds. Undoing a fill returns every envelope to exactly its earlier balance; the deposit can then be filled again. Added a `voided_income_txn_id` column to keep the record.
+- **Fills:** each paycheck gets a split screen pre-filled from its pay source's template (bonuses and other income start empty). Suggest funds overdrawn envelopes first, then bills (soonest due), spending (biggest gap), then goals only once every other envelope is full. A fill can't take more than Unallocated holds. Undoing a fill returns every envelope to exactly its earlier balance; the deposit can then be filled again. Added a `voided_income_txn_id` column to keep the record.
 - **Guards:** a paycheck that has been filled can't be deleted, excluded, or changed to another kind until its fill is undone (the app asks and does it for you). Amount edits are allowed.
 - **Bill matching:** when imported expenses land in an envelope, a bill is matched on bank text, amount (within tolerance), and date (within the window; ±3 days for weekly). The bill's next due date moves forward one cycle. Estimated bills follow the average of the last 3 payments; one-time bills switch off once paid. Payments can be linked or unlinked by hand.
-- **Envelopes tab:** a fullness chart (bars with a "should have" line, grouped Bills / Spending / Savings, overdrawn shown to the left of zero), a deposits-to-fill list, bills due in 30 days (overdue first, with whether the envelope covers each), an envelope history drawer with running balance, plus Move money and Fund from Unallocated.
+- **Envelopes tab:** a fullness chart (bars with a "should have" line, grouped Spending / Bills / Goals, overdrawn shown to the left of zero), a deposits-to-fill list, bills due in 30 days (overdue first, with whether the envelope covers each), an envelope history drawer with running balance, plus Move money and Fund from Unallocated.
 - **Analytics:** income rows show a "Funded" or "To fill" badge.
 
 Tests: 151, run with `python -m unittest discover -s tests`.

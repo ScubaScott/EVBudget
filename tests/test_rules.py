@@ -101,11 +101,11 @@ class ClassifyTests(TempAppCase):
 
     def test_check_number_goes_to_one_time_bills(self):
         res, _ = self.classify("CHECK # 647", -250.0, check="647")
-        self.assertEqual((res["envelope"], res["name"], res["match_source"]), ("Bills: One Time", "CHECK #647", "Check Heuristic"))
+        self.assertEqual((res["envelope"], res["name"], res["match_source"]), ("Bills: One Time", "CHECK #647", "Checks"))
 
     def test_default_is_shopping(self):
         res, _ = self.classify("SOME RANDOM SHOP", -12.0)
-        self.assertEqual((res["envelope"], res["match_source"]), ("Shopping", "Default Fallback"))
+        self.assertEqual((res["envelope"], res["match_source"]), ("Shopping", "Everything else spent"))
 
     def test_gas_brand_needs_a_whole_word(self):
         self.assertEqual(self.classify("BP #1234 SHAKOPEE", -40.0)[0]["envelope"], "Gas")

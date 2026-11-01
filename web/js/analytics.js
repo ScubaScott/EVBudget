@@ -257,7 +257,7 @@ function populateEnvelopeDropdowns() {
     const filterSelect = document.getElementById('filterEnvelope');
     const currentFilterVal = filterSelect.value;
     filterSelect.innerHTML = '<option value="">All Envelopes</option>';
-    filterSelect.innerHTML += '<option value="__UNALLOCATED__">Unallocated (Inflows / Blank)</option>';
+    filterSelect.innerHTML += '<option value="__UNALLOCATED__">No envelope (income, transfers, unassigned)</option>';
     sortedEnvs.forEach(env => {
         const opt = document.createElement('option');
         opt.value = env;
@@ -268,7 +268,7 @@ function populateEnvelopeDropdowns() {
 
     // Populate Modal Edit dropdown
     const editSelect = document.getElementById('editEnvelope');
-    editSelect.innerHTML = '<option value="">(Leave Blank for Inflows / Unallocated)</option>';
+    editSelect.innerHTML = '<option value="">(No envelope: income &amp; transfers)</option>';
     sortedEnvs.forEach(env => {
         const opt = document.createElement('option');
         opt.value = env;
@@ -279,7 +279,7 @@ function populateEnvelopeDropdowns() {
     // Populate Bulk Action Envelope dropdown
     const bulkSelect = document.getElementById('bulkEnvelopeSelect');
     if (bulkSelect) {
-        bulkSelect.innerHTML = '<option value="">(Blank / Unallocated)</option>';
+        bulkSelect.innerHTML = '<option value="">(No envelope)</option>';
         sortedEnvs.forEach(env => {
             const opt = document.createElement('option');
             opt.value = env;
@@ -580,7 +580,16 @@ function onFilterChange() {
     updateKPIs();
     updateCharts();
     resetAndRenderTable();
+    document.dispatchEvent(new CustomEvent('filterschanged'));
 }
+
+// One filter bar serves both the Spending and Income tabs, so its values carry over when you switch.
+// There is only one copy in the page; it is moved into whichever of the two tabs is showing.
+document.addEventListener('tabchange', (e) => {
+    const slot = { analytics: 'filterSlotAnalytics', income: 'filterSlotIncome' }[e.detail.tab];
+    const bar = document.getElementById('sharedFilterBar');
+    if (slot && bar && bar.parentElement.id !== slot) document.getElementById(slot).appendChild(bar);
+});
 
 // Sorts the filteredTransactions list according to currentSortColumn & currentSortDirection
 function sortFilteredTransactions() {
@@ -822,7 +831,7 @@ function updateCategorySpendChart() {
         chartTransactions().forEach(txn => {
             const spend = netSpendAmount(txn);
             if (spend !== 0) {
-                const envelope = txn.envelope && txn.envelope.trim().length > 0 ? txn.envelope.trim() : 'Unallocated';
+                const envelope = txn.envelope && txn.envelope.trim().length > 0 ? txn.envelope.trim() : NO_ENVELOPE;
                 totals[envelope] = (totals[envelope] || 0) + spend;
             }
         });
@@ -886,7 +895,7 @@ function updateCategorySpendChart() {
 
                 if (!drilldownCategory && breakdownMode === 'category') {
                     // Category slice clicked: drill down into payees for that category!
-                    if (selectedLabel !== 'Unallocated' && selectedLabel !== 'Other') {
+                    if (selectedLabel !== NO_ENVELOPE && selectedLabel !== 'Other') {
                         drilldownCategory = selectedLabel;
                         updateCategorySpendChart();
                         showToast(`Drilled into payees for: ${selectedLabel}`);
@@ -894,7 +903,7 @@ function updateCategorySpendChart() {
                         const selectEl = document.getElementById('filterEnvelope');
                         selectEl.value = '__UNALLOCATED__';
                         onFilterChange();
-                        showToast('Filtered to Unallocated');
+                        showToast('Filtered to transactions with no envelope');
                     }
                 } else {
                     // Payee slice clicked: filter table to this payee
@@ -972,7 +981,7 @@ function updateSpendingOverTimeChart() {
                 bucketKey = `${y}-${m}`;
             }
 
-            const env = hasEnvelope ? txn.envelope.trim() : 'Unallocated';
+            const env = hasEnvelope ? txn.envelope.trim() : NO_ENVELOPE;
             activeEnvelopesInTimeframe.add(env);
 
             if (!timeBuckets[bucketKey]) {
@@ -1141,7 +1150,7 @@ function updateSpendingOverTimeChart() {
                     const clickedEnv = chartTimeSpendInstance.data.datasets[datasetIndex].label;
                     if (clickedEnv && clickedEnv !== 'Spend' && clickedEnv !== 'Spend Trend') {
                         const selectEl = document.getElementById('filterEnvelope');
-                        selectEl.value = clickedEnv === 'Unallocated' ? '__UNALLOCATED__' : clickedEnv;
+                        selectEl.value = clickedEnv === NO_ENVELOPE ? '__UNALLOCATED__' : clickedEnv;
                     }
                 }
 
@@ -1272,9 +1281,13 @@ function appendNextTableChunk() {
             amountClass = 'amount-muted';
         }
 
+        // Income and transfers never belong to a spending envelope, so they show a dash. Only an expense or
+        // refund with no envelope is worth flagging.
         let envelopeMarkup = hasEnvelope
             ? `<span class="envelope-badge">${escapeHtml(txn.envelope)}</span>`
-            : `<span class="envelope-badge unallocated">Unallocated</span>`;
+            : (txn.txn_kind === 'expense' || txn.txn_kind === 'refund')
+                ? `<span class="envelope-badge unallocated" title="This purchase has no envelope, so it comes out of the Unallocated pool">${NO_ENVELOPE}</span>`
+                : '<span class="import-muted">&mdash;</span>';
         envelopeMarkup += kindBadgeMarkup(txn);
 
         const statusMarkup = txn.is_included === 1
@@ -1497,11 +1510,6 @@ function closeEditModal() {
     if (wasOpen) document.dispatchEvent(new CustomEvent('editclosed'));
 }
 
-function handleModalOverlayClick(event) {
-    if (event.target === document.getElementById('editModalOverlay')) {
-        closeEditModal();
-    }
-}
 
 function onInclusionCheckboxToggle() {
     const isIncluded = document.getElementById('editIsIncluded').checked;
@@ -1721,7 +1729,7 @@ function renderCurrentAuditCandidate() {
 
                     <div class="audit-row-item">
                         <span class="audit-row-label">Envelope</span>
-                        <span class="audit-row-value ${diffEnv ? 'diff-highlight' : ''}">${escapeHtml(a.envelope || '(Unallocated)')}</span>
+                        <span class="audit-row-value ${diffEnv ? 'diff-highlight' : ''}">${escapeHtml(a.envelope || '(No envelope)')}</span>
                     </div>
 
                     <div class="audit-row-item">
@@ -1765,7 +1773,7 @@ function renderCurrentAuditCandidate() {
 
                     <div class="audit-row-item">
                         <span class="audit-row-label">Envelope</span>
-                        <span class="audit-row-value ${diffEnv ? 'diff-highlight' : ''}">${escapeHtml(b.envelope || '(Unallocated)')}</span>
+                        <span class="audit-row-value ${diffEnv ? 'diff-highlight' : ''}">${escapeHtml(b.envelope || '(No envelope)')}</span>
                     </div>
 
                     <div class="audit-row-item">
@@ -2159,7 +2167,6 @@ function openBulkModal(targetField) {
         document.getElementById('bulkStatusSelect').value = String(firstTxn.is_included !== undefined ? firstTxn.is_included : 1);
         document.getElementById('bulkExclusionReason').value = firstTxn.exclusion_reason || '';
         document.getElementById('bulkRulePhrase').value = firstTxn.name || '';
-        document.getElementById('bulkRuleScope').value = '';
         document.getElementById('bulkKindSelect').value = firstTxn.txn_kind || 'expense';
         document.getElementById('bulkPersonSelect').value = firstTxn.person_id ? String(firstTxn.person_id) : '';
         onBulkStatusChange();
@@ -2179,12 +2186,6 @@ function closeBulkModal() {
     document.body.style.overflow = '';
 }
 
-// Handles clicks outside the modal dialog to dismiss
-function handleBulkOverlayClick(event) {
-    if (event.target === document.getElementById('bulkModalOverlay')) {
-        closeBulkModal();
-    }
-}
 
 // Verifies at least one modification category is active before allowing submit
 function validateBulkForm() {
@@ -2210,7 +2211,6 @@ async function submitBulkModalForm() {
     const applyKind = document.getElementById('bulkApplyKind').checked;
     const saveRule = document.getElementById('bulkAlwaysDoThis').checked;
     const rulePhrase = document.getElementById('bulkRulePhrase').value.trim();
-    const ruleScope = document.getElementById('bulkRuleScope').value;
 
     if (!applyPayee && !applyEnvelope && !applyStatus && !applyKind) {
         showToast("Please choose at least one field to update.", true);
@@ -2220,12 +2220,6 @@ async function submitBulkModalForm() {
     if (saveRule && !rulePhrase) {
         showToast("Please enter a match keyword or phrase for the rule.", true);
         document.getElementById('bulkRulePhrase').focus();
-        return;
-    }
-
-    if (saveRule && !ruleScope) {
-        showToast("Choose who the rule applies to: just you, or everyone.", true);
-        document.getElementById('bulkRuleScope').focus();
         return;
     }
 
@@ -2254,8 +2248,7 @@ async function submitBulkModalForm() {
         txn_ids: Array.from(selectedTxnIds),
         updates: updates,
         save_rule: saveRule,
-        rule_phrase: rulePhrase,
-        rule_scope: ruleScope
+        rule_phrase: rulePhrase
     };
 
     const saveBtn = document.getElementById('btnSaveBulkModal');
@@ -2313,7 +2306,7 @@ async function setEnvelopeKind(name, kind) {
         await apiPost('/api/envelopes/save', { id: info.id, kind });
         info.kind = kind;
         if (hideBillEnvelopes) updateCharts();
-        showToast(`"${name}" is now a ${{ spending: 'spending', bill: 'bills', savings: 'savings' }[kind]} envelope.`);
+        showToast(`"${name}" is now a ${ENVELOPE_KIND_LABELS[kind].toLowerCase()} envelope.`);
     } catch (err) {
         showToast(err.message, true);
         renderEnvelopeManagerList();
@@ -2340,11 +2333,6 @@ function closeEnvelopeManagerModal() {
     document.dispatchEvent(new CustomEvent('txnsrefreshed'));  // other tabs reload their envelope lists
 }
 
-function handleEnvelopeModalOverlayClick(event) {
-    if (event.target === document.getElementById('envelopeModalOverlay')) {
-        closeEnvelopeManagerModal();
-    }
-}
 
 function getEnvelopeTxnCounts() {
     const counts = {};
@@ -2369,8 +2357,8 @@ function renderEnvelopeManagerList() {
     if (searchVal) {
         envList = envList.filter(e => e.toLowerCase().includes(searchVal));
     }
-    // Sort alphabetically
-    envList.sort((a, b) => a.localeCompare(b));
+    // The server already orders each type (A-Z unless the owner has reordered it)
+    const canSort = !searchVal;
 
     document.getElementById('envSummaryCount').textContent = `${envList.length} envelope${envList.length === 1 ? '' : 's'}`;
 
@@ -2385,7 +2373,7 @@ function renderEnvelopeManagerList() {
         return;
     }
 
-    container.innerHTML = envList.map(env => {
+    const renderRow = (env, pos, total) => {
         const txnCount = counts[env.trim().toLowerCase()] || 0;
         const isEditing = editingEnvelopeName === env;
 
@@ -2407,13 +2395,16 @@ function renderEnvelopeManagerList() {
         }
 
         return `
-            <tr class="envelope-row">
+            <tr class="envelope-row" data-env="${escapeHtml(env)}" data-kind="${(envelopeKinds[env] || {}).kind || ''}"
+                ${canSort && envelopeKinds[env] ? `draggable="true" ondragstart="envDragStart(event)" ondragover="envDragOver(event)" ondragleave="envDragLeave(event)" ondrop="envDrop(event)" ondragend="envDragEnd()"` : ''}>
                 <td class="env-name-cell">
+                    ${canSort && envelopeKinds[env] ? `<span class="env-drag-handle" title="Drag to reorder">&#8942;&#8942;</span>
+                    <input type="number" min="1" max="${total}" value="${pos}" class="env-pos-input" data-env="${escapeHtml(env)}" title="Position in this list: type a number to move it" aria-label="Position of ${escapeHtml(env)}" onchange="moveEnvelopeTo(this.dataset.env, this.value)">` : ''}
                     <span>${escapeHtml(env)}</span>
                 </td>
                 <td>
                     <select class="select-input env-kind-select" onchange="setEnvelopeKind(this.dataset.env, this.value)" data-env="${escapeHtml(env)}" ${envelopeKinds[env] ? '' : 'disabled'} aria-label="Type of ${escapeHtml(env)}">
-                        ${[['spending', 'Spending'], ['bill', 'Bills'], ['savings', 'Savings']].map(([v, l]) =>
+                        ${ENVELOPE_KINDS.map(([v, l]) =>
                             `<option value="${v}" ${(envelopeKinds[env] || {}).kind === v ? 'selected' : ''}>${l}</option>`).join('')}
                     </select>
                 </td>
@@ -2444,7 +2435,78 @@ function renderEnvelopeManagerList() {
                 </td>
             </tr>
         `;
+    };
+
+    const kindOf = (env) => (envelopeKinds[env] || { kind: 'spending' }).kind;
+    container.innerHTML = ENVELOPE_KINDS.map(([kind, label]) => {
+        const rows = envList.filter(env => kindOf(env) === kind);
+        if (!rows.length) return '';
+        const manual = rows.some(env => (envelopeKinds[env] || {}).manual);
+        return `<tr class="envelope-group-row"><td colspan="4">
+                <span>${label}</span>
+                <span class="envelope-group-note">${manual ? 'your order' : 'A&ndash;Z'}</span>
+                ${manual && canSort ? `<button type="button" class="btn-inline-action btn-inline-cancel" onclick="resetEnvelopeOrder('${kind}')">Reset to A&ndash;Z</button>` : ''}
+            </td></tr>` + rows.map((env, i) => renderRow(env, i + 1, rows.length)).join('');
     }).join('');
+}
+
+// ---- Reordering: drag a row, or type a new position. Each type keeps its own order. ----
+let envDragName = null;
+
+function envDragStart(ev) {
+    const row = ev.currentTarget;
+    envDragName = row.dataset.env;
+    ev.dataTransfer.effectAllowed = 'move';
+    try { ev.dataTransfer.setData('text/plain', envDragName); } catch (e) { /* some browsers need data to start a drag */ }
+    row.classList.add('env-dragging');
+}
+
+function envDragOver(ev) {
+    const row = ev.currentTarget;
+    if (!envDragName || row.dataset.kind !== (envelopeKinds[envDragName] || {}).kind || row.dataset.env === envDragName) return;
+    ev.preventDefault();
+    row.classList.add('env-drop-target');
+}
+
+function envDragLeave(ev) { ev.currentTarget.classList.remove('env-drop-target'); }
+
+function envDragEnd() {
+    envDragName = null;
+    document.querySelectorAll('.env-dragging, .env-drop-target').forEach(r => r.classList.remove('env-dragging', 'env-drop-target'));
+}
+
+function envDrop(ev) {
+    ev.preventDefault();
+    const target = ev.currentTarget.dataset.env, name = envDragName;
+    envDragEnd();
+    if (!name || name === target || ev.currentTarget.dataset.kind !== (envelopeKinds[name] || {}).kind) return;
+    const names = configuredEnvelopesList.filter(e => (envelopeKinds[e] || {}).kind === envelopeKinds[name].kind);
+    moveEnvelopeTo(name, names.indexOf(target) + 1);
+}
+
+async function moveEnvelopeTo(name, position) {
+    const kind = (envelopeKinds[name] || {}).kind;
+    if (!kind) return;
+    const names = configuredEnvelopesList.filter(e => (envelopeKinds[e] || {}).kind === kind && e !== name);
+    const at = Math.max(1, Math.min(names.length + 1, parseInt(position, 10) || 1));
+    names.splice(at - 1, 0, name);
+    await sendEnvelopeOrder({ kind, names });
+}
+
+async function resetEnvelopeOrder(kind) {
+    await sendEnvelopeOrder({ kind, reset: true });
+}
+
+async function sendEnvelopeOrder(body) {
+    try {
+        const res = await apiPost('/api/envelopes/reorder', body);
+        configuredEnvelopesList = res.envelopes || configuredEnvelopesList;
+        envelopeKinds = res.kinds || envelopeKinds;
+        populateEnvelopeDropdowns();
+    } catch (err) {
+        showToast(err.message, true);
+    }
+    renderEnvelopeManagerList();
 }
 
 function filterDashboardToEnvelope(envName) {
@@ -2607,11 +2669,6 @@ function closeDeleteEnvelopeModal() {
     modal.classList.remove('active');
 }
 
-function handleDeleteModalOverlayClick(event) {
-    if (event.target === document.getElementById('deleteEnvelopeModalOverlay')) {
-        closeDeleteEnvelopeModal();
-    }
-}
 
 function toggleDeleteHandlingMode() {
     const isReassign = document.getElementById('optReassign').checked;
@@ -2672,7 +2729,7 @@ async function executeDeleteEnvelopeDirect(envName, reassignTo) {
             onFilterChange();
 
             if (result.reassigned_count > 0) {
-                const destText = reassignTo ? `reassigned to "${reassignTo}"` : `marked Unallocated`;
+                const destText = reassignTo ? `reassigned to "${reassignTo}"` : `left with no envelope`;
                 showToast(`Envelope "${envName}" removed; ${result.reassigned_count} transactions ${destText}`);
             } else {
                 showToast(`Envelope "${envName}" removed successfully`);

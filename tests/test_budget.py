@@ -109,7 +109,7 @@ class EnvelopeSettingsTests(BudgetCase):
         row = c.execute("SELECT * FROM envelopes WHERE id = ?", (gid,)).fetchone()
         c.close()
         self.assertEqual((row["monthly_budget_cents"], row["rollover_mode"]), (65050, "rollover"))
-        for bad in ({"kind": "bogus"}, {"monthly_budget": -5}, {"monthly_budget": "x"}, {"goal_date": "nope"}):
+        for bad in ({"kind": "bogus"}, {"kind": "savings"}, {"monthly_budget": -5}, {"monthly_budget": "x"}, {"goal": 0}, {"goal": -10}, {"goal": "x"}):
             with self.assertRaises(HttpError):
                 self.call(self.app.save_envelope_settings, dict({"id": gid}, **bad))
         with self.assertRaises(HttpError):
@@ -159,13 +159,16 @@ class SuggestionTests(BudgetCase):
         s = self.suggestions()["suggestions"][str(self.env_id("Insurance: Auto"))]
         self.assertEqual((s["basis"], s["suggested"]), ("bills", 300.0))
 
-    def test_savings_gets_no_suggestion_and_summary_compares_with_income(self):
-        self.call(self.app.save_envelope_settings, {"id": self.env_id("Gas"), "kind": "savings", "monthly_budget": 200})
+    def test_goal_gets_no_suggestion_and_adds_nothing_to_the_budgeted_total(self):
+        # A monthly budget left over from before the envelope became a goal is ignored.
+        self.call(self.app.save_envelope_settings, {"id": self.env_id("Gas"), "kind": "goal", "goal": 5000, "monthly_budget": 200})
         self.call(self.app.save_envelope_settings, {"id": self.env_id("Groceries"), "monthly_budget": 600})
         out = self.suggestions()
-        self.assertIsNone(out["suggestions"][str(self.env_id("Gas"))]["suggested"])
-        self.assertEqual(out["summary"]["total_budgeted"], 800.0)
-        self.assertEqual(out["summary"]["surplus"], round(out["summary"]["planning_income"] - 800.0, 2))
+        s = out["suggestions"][str(self.env_id("Gas"))]
+        self.assertEqual((s["basis"], s["suggested"]), ("goal", None))
+        self.assertIsNone(s["to_go"])   # no go-live yet, so no balance to compare
+        self.assertEqual(out["summary"]["total_budgeted"], 600.0)
+        self.assertEqual(out["summary"]["surplus"], round(out["summary"]["planning_income"] - 600.0, 2))
 
     def test_accept_skips_envelopes_whose_budget_comes_from_bills(self):
         auto, groc = self.env_id("Insurance: Auto"), self.env_id("Groceries")
@@ -187,7 +190,7 @@ class TemplateTests(BudgetCase):
 
     def test_generated_lines_add_back_up_to_the_budget(self):
         self.paychecks()
-        budgets = {"Groceries": 800, "Gas": 250, "Bills: Mortgage": 1167}
+        budgets = {"Groceries": 800, "Gas": 250, "Mortgage": 1167}
         for name, amount in budgets.items():
             self.call(self.app.save_envelope_settings, {"id": self.env_id(name), "monthly_budget": amount})
         monthly_total = 0.0

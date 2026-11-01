@@ -122,13 +122,6 @@ def envelope_states(conn: Any, as_of: date) -> Dict[str, Any]:
     dim = calendar.monthrange(as_of.year, as_of.month)[1]
     f_month = (as_of.day - 1) / dim
 
-    opening: Dict[int, int] = defaultdict(int)
-    for r in conn.execute("SELECT to_envelope_id AS t, from_envelope_id AS f, amount_cents AS a FROM envelope_moves WHERE move_type = 'opening' AND voided_at IS NULL"):
-        if r["t"] is not None:
-            opening[int(r["t"])] += r["a"]
-        if r["f"] is not None:
-            opening[int(r["f"])] -= r["a"]
-
     out: List[Dict[str, Any]] = []
     for e in env_mod.list_envelopes(conn, as_of):
         eid = e["id"]
@@ -137,6 +130,7 @@ def envelope_states(conn: Any, as_of: date) -> Dict[str, Any]:
         budget = to_cents(e["effective_budget"])
         active_bills = [b for b in e["bills"] if b["active"]]
         marker: Optional[float]
+        goal_info: Dict[str, Any] = {}
         if e["kind"] == "bill" and active_bills:
             capacity = float(sum(b["amount_cents"] for b in active_bills))
             marker = sum(_bill_marker_cents(b, as_of, G) for b in active_bills)
@@ -145,17 +139,18 @@ def envelope_states(conn: Any, as_of: date) -> Dict[str, Any]:
             capacity = carry_in + budget
             marker = carry_in + budget * ((as_of.day) / dim)
             mode = "accrue"
-        elif e["kind"] == "savings":
-            goal = e["goal_cents"]
-            capacity = float(goal) if goal else float(balance + budget)
-            goal_date = recurrence.parse(e["goal_date"] or "")
-            if goal and goal_date and goal_date > G:
-                base = opening.get(eid, 0)
-                frac = min(1.0, max(0.0, (as_of - G).days / (goal_date - G).days))
-                marker = base + (goal - base) * frac
-            else:
-                marker = None
-            mode = "accrue"
+        elif e["kind"] == "goal":
+            # No date, so no "should have by now" line: the bar simply fills toward the goal amount.
+            # A goal with no amount is open-ended: money just collects there.
+            goal = e["goal_cents"] or 0
+            capacity = float(goal) if goal > 0 else float(max(balance, 0))
+            marker = None
+            mode = "goal"
+            goal_info = {
+                "goal": to_dollars(goal) if goal > 0 else None,
+                "to_go": to_dollars(max(0, goal - balance)) if goal > 0 else None,
+                "pct": int(max(0, balance) * 100 // goal) if goal > 0 else None,
+            }
         else:
             capacity = float(carry_in + budget)
             marker = carry_in + budget * (1 - f_month)
@@ -163,6 +158,8 @@ def envelope_states(conn: Any, as_of: date) -> Dict[str, Any]:
 
         if balance < 0:
             status = "overdrawn"
+        elif e["kind"] == "goal":
+            status = "open" if not goal_info["goal"] else ("reached" if balance >= e["goal_cents"] else "saving")
         elif balance > 0 and balance >= capacity:  # includes a target of zero or less (a carried-in deficit)
             status = "funded"
         elif marker is not None and balance < marker * 0.9:
@@ -178,6 +175,7 @@ def envelope_states(conn: Any, as_of: date) -> Dict[str, Any]:
             "carry_in": to_dollars(carry_in), "budget": e["effective_budget"], "marker_mode": mode, "status": status,
             "next_due": due_dates[0] if due_dates else None,
             "overdue": any(b["overdue"] for b in active_bills),
+            **goal_info,
         })
     unalloc_id = _envelope_index(conn)["unalloc"]
     unalloc = bal.get(unalloc_id, 0)
@@ -314,7 +312,8 @@ def draft_allocation(conn: Any, txn_id: str, as_of: date) -> Dict[str, Any]:
 
 
 def suggest_allocation(conn: Any, amount: float, as_of: date) -> List[Dict[str, Any]]:
-    """Spread money where it's needed most: overdrawn first, then bills, then spending, then savings."""
+    """Spread money where it's needed most: overdrawn first, then bills, then spending. Goals get
+    what's left, and only once every other envelope is full."""
     states = envelope_states(conn, as_of)
     if not states["enabled"]:
         raise ValidationError("Set up go-live on the Budget tab first")
@@ -346,8 +345,25 @@ def suggest_allocation(conn: Any, amount: float, as_of: date) -> List[Dict[str, 
         give(e, room(e))
     for e in sorted((e for e in envs if e["kind"] == "spending"), key=lambda e: -room(e)):
         give(e, room(e))
-    for e in (e for e in envs if e["kind"] == "savings"):
-        give(e, room(e))
+
+    # Goals take extra money only: when every other envelope is full, split what's left evenly
+    # across the goals still short of their amount.
+    def given(e: Dict[str, Any]) -> int:
+        return next((ln["cents"] for ln in lines if ln["envelope_id"] == e["id"]), 0)
+
+    others_full = all(to_cents(e["balance"]) + given(e) >= to_cents(e["capacity"]) for e in envs if e["kind"] != "goal")
+    if others_full:
+        def short(e: Dict[str, Any]) -> int:
+            return max(0, to_cents(e["goal"]) - to_cents(e["balance"]) - given(e))
+
+        goals = [e for e in envs if e["kind"] == "goal" and e.get("goal")]
+        while remaining > 0:
+            open_goals = [e for e in goals if short(e) > 0]
+            if not open_goals:
+                break
+            share = max(1, remaining // len(open_goals))
+            for e in open_goals:
+                give(e, min(share, short(e)))
     return [{"envelope_id": ln["envelope_id"], "amount": to_dollars(ln["cents"])} for ln in lines]
 
 

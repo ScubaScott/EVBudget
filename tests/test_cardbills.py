@@ -122,7 +122,7 @@ class CardBillsDbTests(TempAppCase):
     def test_existing_bill_is_linked_by_phrase_and_by_name(self):
         self.monthly("Visa 1111", "NETFLIX.COM", 15.49)
         self.monthly("Visa 1111", "SPOTIFY USA", 11.99)
-        env = self.conn().execute("SELECT id FROM envelopes WHERE name = 'Bills: Subscriptions'").fetchone()[0]
+        env = self.conn().execute("SELECT id FROM envelopes WHERE name = 'Subscriptions'").fetchone()[0]
         c = self.conn()
         c.execute("INSERT INTO bills (envelope_id, name, match_phrase, amount_mode, amount_cents, freq, interval, anchor_date, next_due_date) "
                   "VALUES (?, 'Streaming', 'NETFLIX', 'fixed', 1549, 'monthly', 1, '2026-11-05', '2026-11-05')", (env,))

@@ -49,7 +49,7 @@ class ProfileCase(unittest.TestCase):
             c.close()
 
     def add_rule(self, **kw):
-        body = {"phrase": "ZZVENDOR", "stage": "envelope", "set_envelope": "Gas"}
+        body = {"phrase": "ZZVENDOR", "set_envelope": "Gas"}
         body.update(kw)
         return self.call(self.app.save_rule, body)["id"]
 
@@ -232,36 +232,21 @@ class SharedRuleTests(ProfileCase):
         self.create("Kendra")
         self.assertEqual(self.rows("SELECT COUNT(*) AS n FROM shared.rules")[0]["n"], shared["n"])
 
-    def test_scope_must_be_chosen(self):
-        with self.assertRaises(HttpError) as cm:
-            self.add_rule()
-        self.assertIn("just for you or for everyone", cm.exception.message)
-        with self.assertRaises(HttpError):
-            self.add_rule(scope="everyone")
-
-    def test_shared_rule_reaches_every_budget_personal_does_not(self):
-        self.add_rule(phrase="ZZSHARED", scope="shared")
-        self.add_rule(phrase="ZZPERSONAL", scope="personal")
+    def test_every_rule_is_shared_and_reaches_every_budget(self):
+        s = self.add_rule(phrase="ZZSHARED")
+        self.assertGreaterEqual(s, store.SHARED_ID_BASE)
+        self.assertEqual(self.rows("SELECT COUNT(*) AS n FROM rules")[0]["n"], 0)
         self.assertEqual(self.classify("ZZSHARED 1")["envelope"], "Gas")
-        self.assertEqual(self.classify("ZZPERSONAL 1")["envelope"], "Gas")
         self.call(self.app.profile_close)
         self.create("Kendra")
         self.assertEqual(self.classify("ZZSHARED 1")["envelope"], "Gas")
-        self.assertEqual(self.classify("ZZPERSONAL 1")["envelope"], "Shopping")  # default: the rule isn't here
 
-    def test_personal_rule_beats_shared(self):
-        self.add_rule(scope="shared", set_envelope="Groceries")
-        self.assertEqual(self.classify()["envelope"], "Groceries")
-        self.add_rule(scope="personal", set_envelope="Restaurant")
-        self.assertEqual(self.classify()["envelope"], "Restaurant")
-
-    def test_rule_list_marks_scope_and_ids_do_not_collide(self):
-        p = self.add_rule(phrase="ZZP", scope="personal")
-        s = self.add_rule(phrase="ZZS", scope="shared")
-        self.assertLess(p, store.SHARED_ID_BASE)
-        self.assertGreaterEqual(s, store.SHARED_ID_BASE)
-        listed = {r["id"]: r["scope"] for r in self.app.get_rules(Request("GET", "/x", {}, {}, b""))["rules"]}
-        self.assertEqual((listed[p], listed[s]), ("personal", "shared"))
+    def test_rule_list_has_one_list_with_names_and_ids_that_do_not_collide(self):
+        a = self.add_rule(phrase="ZZA")
+        b = self.add_rule(phrase="ZZB", name="The B rule")
+        listed = {r["id"]: r for r in self.app.get_rules(Request("GET", "/x", {}, {}, b""))["rules"]}
+        self.assertEqual((listed[a]["name"], listed[b]["name"]), ("ZZA", "The B rule"))
+        self.assertLess(listed[b]["priority"], listed[a]["priority"])      # the newer rule runs first
 
     def test_edit_in_place_and_delete_use_the_right_store(self):
         s = self.add_rule(phrase="ZZS", scope="shared")
@@ -270,29 +255,13 @@ class SharedRuleTests(ProfileCase):
         self.call(self.app.delete_rule, {"id": s})
         self.assertEqual(self.rows("SELECT id FROM shared.rules WHERE id = ?", s), [])
 
-    def test_changing_scope_moves_the_rule(self):
-        p = self.add_rule(phrase="ZZMOVE", scope="personal")
-        new_id = self.call(self.app.save_rule, {"id": p, "phrase": "ZZMOVE", "stage": "envelope", "set_envelope": "Gas", "scope": "shared"})["id"]
-        self.assertGreaterEqual(new_id, store.SHARED_ID_BASE)
-        self.assertEqual(self.rows("SELECT id FROM rules WHERE phrase = 'ZZMOVE'"), [])
-        self.assertEqual(len(self.rows("SELECT id FROM shared.rules WHERE phrase = 'ZZMOVE'")), 1)
-
-    def test_same_phrase_can_exist_in_both_scopes(self):
-        self.add_rule(phrase="ZZBOTH", scope="personal")
-        self.add_rule(phrase="ZZBOTH", scope="shared")
-        self.assertEqual(len(self.rows("SELECT id FROM rules WHERE phrase = 'ZZBOTH'")), 1)
-        self.assertEqual(len(self.rows("SELECT id FROM shared.rules WHERE phrase = 'ZZBOTH'")), 1)
-
-    def test_bulk_always_do_this_needs_a_scope_and_honours_it(self):
+    def test_bulk_always_do_this_goes_to_the_shared_rules(self):
         c = self.app.conn()
         c.execute("INSERT INTO transactions (txn_id, date, name, raw_name, amount, envelope, account_type, is_included, txn_kind) "
                   "VALUES ('T1', '2026-05-01', 'ZZBULK', 'ZZBULK', -5, 'Shopping', 'Credit / Debit', 1, 'expense')")
         c.commit()
         c.close()
-        body = {"txn_ids": ["T1"], "updates": {"envelope": "Gas"}, "save_rule": True, "rule_phrase": "ZZBULK"}
-        with self.assertRaises(HttpError):
-            self.call(self.app.bulk_update, body)
-        self.call(self.app.bulk_update, dict(body, rule_scope="shared"))
+        self.call(self.app.bulk_update, {"txn_ids": ["T1"], "updates": {"envelope": "Gas"}, "save_rule": True, "rule_phrase": "ZZBULK"})
         self.assertEqual(len(self.rows("SELECT id FROM shared.rules WHERE phrase = 'ZZBULK'")), 1)
         self.assertEqual(self.rows("SELECT id FROM rules WHERE phrase = 'ZZBULK'"), [])
 
@@ -324,9 +293,6 @@ class MissingEnvelopeTests(ProfileCase):
         out = self.classify()
         self.assertEqual((out["envelope"], out["needs_review"]), ("Groceries", 1))  # still flagged: a rule was skipped
 
-    def test_personal_rules_are_not_second_guessed(self):
-        self.add_rule(scope="personal", set_envelope="Boat Fuel")
-        self.assertEqual(self.classify()["envelope"], "Boat Fuel")
 
 
 class LegacyMigrationTests(ProfileCase):
@@ -335,7 +301,7 @@ class LegacyMigrationTests(ProfileCase):
         c = store.connect(self.legacy_db)
         c.execute("INSERT INTO transactions (txn_id, date, name, raw_name, amount, envelope, account_type, is_included, txn_kind) "
                   "VALUES ('OLD1', '2026-04-01', 'KROGER', 'KROGER', -20, 'Groceries', 'Credit / Debit', 1, 'expense')")
-        store.insert_rule(c, {"phrase": "ZZMYRULE", "stage": "envelope", "set_envelope": "Gas", "origin": "user", "priority": 5})
+        store.insert_rule(c, {"phrase": "ZZMYRULE", "set_envelope": "Gas", "priority": 5})
         c.commit()
         self.legacy_rule_count = c.execute("SELECT COUNT(*) FROM rules").fetchone()[0]
         c.close()

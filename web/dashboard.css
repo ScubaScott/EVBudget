@@ -2271,6 +2271,16 @@ footer.app-footer {
     opacity: 0.6;
 }
 
+/* A file whose rows are already in the database: dimmed, but still selectable */
+.import-file-done td {
+    opacity: 0.55;
+}
+
+.import-files-table th[onclick] {
+    cursor: pointer;
+    user-select: none;
+}
+
 .import-row-skipped td {
     opacity: 0.4;
     text-decoration: line-through;
@@ -2392,15 +2402,132 @@ footer.app-footer {
 /* ---------------------------------------------------------------------
    Rules and re-run dialogs
    --------------------------------------------------------------------- */
-.rules-add {
-    display: grid;
-    grid-template-columns: 1.3fr 1.2fr 1fr auto;
-    gap: 8px;
-    margin-bottom: 14px;
+.rule-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 16px;
+    padding: 14px;
+    background: var(--bg-card-subtle);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
 }
 
-.rules-add #ruleNewPayee {
-    grid-column: 3;
+.rule-form-row {
+    display: grid;
+    grid-template-columns: 52px 1fr;
+    gap: 10px;
+    align-items: start;
+}
+
+.rule-form-row > label {
+    padding-top: 8px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.rule-form-fields {
+    display: grid;
+    grid-template-columns: 1.3fr 1.6fr 0.9fr 1fr;
+    gap: 8px;
+}
+
+.rule-form-fields [hidden] {
+    display: none;
+}
+
+.rule-do {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.rule-do-line {
+    display: grid;
+    grid-template-columns: 170px 1fr 1fr;
+    gap: 8px;
+    align-items: center;
+}
+
+.rule-do-line .checkbox-row {
+    white-space: nowrap;
+}
+
+.rule-do-line [hidden] {
+    display: none;
+}
+
+.rule-name {
+    font-weight: 600;
+}
+
+.rule-finds {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+.rule-finds code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    background: var(--bg-card-subtle);
+    padding: 0 5px;
+    border-radius: 4px;
+}
+
+.rule-dir {
+    margin-left: 6px;
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 1px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+}
+
+.rule-chip {
+    display: inline-block;
+    margin: 0 4px 3px 0;
+    padding: 2px 8px;
+    font-size: 12.5px;
+    border-radius: 999px;
+    background: var(--bg-card-subtle);
+    border: 1px solid var(--border-color);
+}
+
+.rule-chip-link {
+    font: inherit;
+    font-size: 12.5px;
+    color: var(--accent-blue);
+    cursor: pointer;
+}
+
+.rule-chip-link:hover {
+    border-color: var(--border-focus);
+}
+
+.rule-chip-note {
+    color: var(--text-muted);
+}
+
+.import-original {
+    margin-top: 2px;
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11.5px;
+    color: var(--text-muted);
+}
+
+.rule-problem {
+    margin-top: 3px;
+    font-size: 12px;
+    color: var(--accent-red);
 }
 
 .rules-toolbar {
@@ -2442,12 +2569,8 @@ footer.app-footer {
         padding: 0 12px;
     }
 
-    .rules-add {
+    .rule-form-row {
         grid-template-columns: 1fr;
-    }
-
-    .rules-add #ruleNewPayee {
-        grid-column: auto;
     }
 
     .import-card {
@@ -2783,6 +2906,76 @@ footer.app-footer {
     color: var(--text-dim);
 }
 
+/* Goals: purple while saving, gold with a shimmer once reached, grey when there's no amount */
+.env-fill.st-saving { background: var(--accent-purple); }
+.env-fill.st-open { background: var(--text-dim); opacity: 0.55; }
+.env-fill.st-reached {
+    background: linear-gradient(100deg, #f59e0b 0%, #facc15 35%, #fde68a 50%, #facc15 65%, #f59e0b 100%);
+    background-size: 220% 100%;
+    animation: goalShimmer 3.2s linear infinite;
+}
+
+.env-track-reached {
+    border-color: #f59e0b;
+    box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.18);
+}
+
+.env-goal-cheer {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 10px;
+    font-size: 12px;
+    font-weight: 700;
+    color: #3b2400;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    z-index: 2;
+    pointer-events: none;
+}
+
+.env-chip.st-saving { background: rgba(139, 92, 246, 0.15); color: var(--accent-purple); }
+.env-chip.st-reached { background: rgba(245, 158, 11, 0.2); color: var(--accent-amber); }
+.env-chip.st-open { background: var(--bg-card-subtle); color: var(--text-dim); }
+
+@keyframes goalShimmer {
+    from { background-position: 100% 0; }
+    to { background-position: -120% 0; }
+}
+
+.confetti-layer {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    z-index: 3000;
+}
+
+.confetti-layer i {
+    position: absolute;
+    top: -16px;
+    width: 8px;
+    height: 13px;
+    border-radius: 2px;
+    animation-name: confettiFall;
+    animation-timing-function: cubic-bezier(0.25, 0.6, 0.45, 1);
+    animation-fill-mode: forwards;
+}
+
+@keyframes confettiFall {
+    to {
+        transform: translate(var(--drift), 105vh) rotate(var(--spin));
+        opacity: 0.85;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .env-fill.st-reached { animation: none; }
+}
+
 .alloc-actions {
     display: flex;
     gap: 8px;
@@ -2912,17 +3105,6 @@ footer.app-footer {
     border-radius: 4px;
 }
 
-
-.rules-desc-input {
-    margin-bottom: 8px;
-}
-
-.rule-desc {
-    font-size: 12.5px;
-    font-weight: 600;
-    color: var(--text-main);
-    margin-bottom: 3px;
-}
 
 
 .rules-save-buttons {
@@ -3133,12 +3315,6 @@ button.kind-link:focus-visible {
     }
 }
 
-.rule-origin {
-    margin-left: 6px;
-    font-size: 11px;
-    color: var(--text-muted);
-}
-
 /* ---------------------------------------------------------------------
    Budgets (profiles): the picker page, the header chip, PIN settings, rule scope
    --------------------------------------------------------------------- */
@@ -3276,54 +3452,6 @@ button.kind-link:focus-visible {
     flex: 1 1 140px;
 }
 
-.scope-choice {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-
-.scope-choice button {
-    text-align: left;
-    background: var(--bg-card-subtle);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-md);
-    color: var(--text-main);
-    padding: 10px 14px;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-}
-
-.scope-choice button:hover {
-    background: var(--bg-card-hover);
-    border-color: var(--border-focus);
-}
-
-.scope-choice button small {
-    display: block;
-    margin-top: 2px;
-    color: var(--text-muted);
-    font-size: 11.5px;
-    font-weight: 400;
-}
-
-.rule-scope {
-    margin-left: 6px;
-    font-size: 10.5px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 1px 7px;
-    border-radius: 999px;
-    border: 1px solid var(--border-color);
-    color: var(--text-muted);
-}
-
-.rule-scope.shared {
-    border-color: var(--accent-teal);
-    color: var(--accent-teal);
-}
-
 /* ---------------------------------------------------------------------
    Card bills
    --------------------------------------------------------------------- */
@@ -3368,3 +3496,42 @@ button.kind-link:focus-visible {
     background: var(--accent-green);
     transition: width 0.25s ease;
 }
+
+/* Envelope manager: reordering */
+.envelope-group-row td {
+    padding: 14px 14px 6px;
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    background: var(--bg-card-subtle);
+}
+
+.envelope-group-note {
+    margin: 0 10px;
+    font-weight: 500;
+    letter-spacing: 0;
+    text-transform: none;
+}
+
+.env-drag-handle {
+    cursor: grab;
+    color: var(--text-dim);
+    letter-spacing: -3px;
+    user-select: none;
+}
+
+.env-pos-input {
+    width: 44px;
+    padding: 2px 4px;
+    font-size: 12px;
+    text-align: center;
+    background: var(--bg-input);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+}
+
+.envelope-row.env-dragging { opacity: 0.45; }
+.envelope-row.env-drop-target { box-shadow: inset 0 3px 0 var(--accent-blue); }

@@ -83,10 +83,21 @@ class TransactionEditTests(TempAppCase):
             "save_rule": True, "rule_phrase": "ZED SHOP",
         })
         c = self.conn()
-        rule = c.execute("SELECT * FROM rules WHERE phrase = 'ZED SHOP'").fetchone()
+        rows = c.execute("SELECT * FROM rules WHERE phrase = 'ZED SHOP'").fetchall()
         c.close()
-        self.assertEqual((rule["stage"], rule["set_envelope"], rule["set_payee"], rule["origin"]),
-                         ("envelope", "Restaurant", "Zed", "user"))
+        self.assertEqual(len(rows), 1)       # the rename and the envelope live in one rule
+        rule = rows[0]
+        self.assertEqual((rule["set_envelope"], rule["set_payee"], rule["name"], rule["direction"]),
+                         ("Restaurant", "Zed", "Zed", "any"))
+
+    def test_learning_twice_adds_to_the_same_rule(self):
+        a = self.add_txn(amount=-5.0, name="ZED SHOP")
+        self.call(self.app.bulk_update, {"txn_ids": [a], "updates": {"envelope": "Restaurant"}, "save_rule": True, "rule_phrase": "ZED SHOP"})
+        self.call(self.app.bulk_update, {"txn_ids": [a], "updates": {"name": "Zed"}, "save_rule": True, "rule_phrase": "zed shop"})
+        c = self.conn()
+        rows = c.execute("SELECT set_envelope, set_payee FROM rules WHERE UPPER(phrase) = 'ZED SHOP'").fetchall()
+        c.close()
+        self.assertEqual([(r["set_envelope"], r["set_payee"]) for r in rows], [("Restaurant", "Zed")])
 
     def test_learning_a_refund_rule_keeps_spending_separate(self):
         a = self.add_txn(amount=10.0, name="ZELLE IN", envelope="", txn_kind="refund")
@@ -95,9 +106,9 @@ class TransactionEditTests(TempAppCase):
             "save_rule": True, "rule_phrase": "ZELLE IN",
         })
         c = self.conn()
-        stages = [r["stage"] for r in c.execute("SELECT stage FROM rules WHERE phrase = 'ZELLE IN'")]
+        found = [(r["direction"], r["set_kind"], r["set_envelope"]) for r in c.execute("SELECT * FROM rules WHERE phrase = 'ZELLE IN'")]
         c.close()
-        self.assertEqual(stages, ["refund"])
+        self.assertEqual(found, [("in", "refund", "Groceries")])      # only money coming in, so spending isn't pulled in
 
     def test_newer_user_rule_runs_before_older_one(self):
         self.call(self.app.save_rule, {"phrase": "WALMART", "set_envelope": "Groceries"})
@@ -105,8 +116,8 @@ class TransactionEditTests(TempAppCase):
         c = self.conn()
         ctx = rules.load_context(c)
         c.close()
-        rule = ctx.rules.first(("envelope",), "WALMART FUEL 123", "WALMART FUEL 123")
-        self.assertEqual(rule["set_envelope"], "Gas")
+        decided = ctx.rules.decide("WALMART FUEL 123", "WALMART FUEL 123", -10.0, "", "")
+        self.assertEqual(decided["envelope"], "Gas")
 
 
 class DeletedAndLegacyIdTests(TempAppCase):
@@ -213,24 +224,24 @@ class ReclassifyTests(TempAppCase):
         res = self.call(self.app.reclassify_transactions, {"apply": False})
         self.assertEqual(res["changed_count"], 1)
         self.assertEqual(res["changes"][0]["txn_id"], auto)
-        self.assertEqual(res["changes"][0]["after"]["envelope"], "Bills: Subscriptions")
+        self.assertEqual(res["changes"][0]["after"]["envelope"], "Subscriptions")
         self.assertEqual(self.get_txn(auto)["envelope"], "Shopping")
 
         self.call(self.app.reclassify_transactions, {"apply": True})
-        self.assertEqual(self.get_txn(auto)["envelope"], "Bills: Subscriptions")
+        self.assertEqual(self.get_txn(auto)["envelope"], "Subscriptions")
         self.assertEqual(self.get_txn(edited)["envelope"], "Restaurant")
 
     def test_include_edited_rows_when_asked(self):
         edited = self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Restaurant", user_modified=1)
         res = self.call(self.app.reclassify_transactions, {"apply": True, "include_edited": True})
         self.assertEqual(res["changed_count"], 1)
-        self.assertEqual(self.get_txn(edited)["envelope"], "Bills: Subscriptions")
+        self.assertEqual(self.get_txn(edited)["envelope"], "Subscriptions")
 
     def test_limited_to_chosen_rows(self):
         a = self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Shopping")
         b = self.add_txn(name="SPOTIFY", raw_name="SPOTIFY", envelope="Shopping")
         self.call(self.app.reclassify_transactions, {"apply": True, "txn_ids": [a]})
-        self.assertEqual(self.get_txn(a)["envelope"], "Bills: Subscriptions")
+        self.assertEqual(self.get_txn(a)["envelope"], "Subscriptions")
         self.assertEqual(self.get_txn(b)["envelope"], "Shopping")
 
 

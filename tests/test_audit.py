@@ -133,8 +133,8 @@ class UnusualTests(AuditCase):
 
     def test_price_change_on_a_steady_subscription(self):
         for m in ("2026-05", "2026-06", "2026-07", "2026-08", "2026-09"):
-            self.spend(f"{m}-03", 15.49, "STREAMING CO", envelope="Bills: Subscriptions")
-        jump = self.spend("2026-10-03", 22.99, "STREAMING CO", envelope="Bills: Subscriptions")
+            self.spend(f"{m}-03", 15.49, "STREAMING CO", envelope="Subscriptions")
+        jump = self.spend("2026-10-03", 22.99, "STREAMING CO", envelope="Subscriptions")
         res = self.run_checks("price_change")
         self.assertEqual(self.keys(res, "price_change"), [jump])
         self.assertIn("up 48%", res["findings"][0]["reason"])
