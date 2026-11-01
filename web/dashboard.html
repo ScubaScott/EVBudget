@@ -25,6 +25,8 @@
             </div>
         </div>
         <div class="header-actions">
+            <!-- Shown only when the git repository has a newer version -->
+            <button class="btn-refresh update-chip" id="btnUpdate" onclick="openUpdateDialog()" hidden>Update available</button>
             <!-- Which budget is open, and a way to switch -->
             <button class="btn-refresh budget-chip" id="btnSwitchBudget" onclick="switchBudget()" title="Close this budget and choose another" hidden>
                 Budget: <strong id="budgetName"></strong> &#8644;
@@ -46,6 +48,25 @@
                 </svg>
                 Reload Data
             </button>
+            <!-- Setup walkthrough -->
+            <div class="wt-help-wrap">
+                <button class="btn-settings" id="btnHelp" onclick="toggleWalkthroughMenu(event)" title="Setup walkthrough" aria-haspopup="menu" aria-expanded="false">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+                        <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                    </svg>
+                    Help
+                </button>
+                <div class="wt-help-menu" id="wtHelpMenu" role="menu" hidden>
+                    <button type="button" role="menuitem" id="wtMenuResume" onclick="wtMenuPick('resume')">Resume setup</button>
+                    <button type="button" role="menuitem" onclick="wtMenuPick('restart')">Start setup from the beginning</button>
+                    <div class="wt-help-sep" role="separator"></div>
+                    <button type="button" role="menuitem" onclick="wtCloseMenu(); checkForUpdates()">Check for updates</button>
+                    <button type="button" role="menuitem" onclick="wtCloseMenu(); openReleaseHistory()">What's new</button>
+                    <button type="button" role="menuitem" onclick="wtCloseMenu(); submitFeedback()">Submit feedback&hellip;</button>
+                </div>
+            </div>
             <!-- Settings Gear Action -->
             <button class="btn-settings" id="btnOpenSettings" onclick="openSettingsModal()" title="Dashboard Settings">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -282,7 +303,8 @@
                         <div class="table-subtitle">Set what each envelope gets per month. Suggestions come from your past spending (complete months only). Bill envelopes take their budget from their bills.</div>
                     </div>
                     <div class="table-header-actions">
-                        <button class="btn-refresh" onclick="acceptAllSuggestions()">Accept all high-confidence</button>
+                        <button class="btn-envelopes" id="btnBudgetManageEnvelopes" onclick="openEnvelopeManagerModal()" title="Add, rename, or delete envelopes">Manage envelopes</button>
+                        <button class="btn-refresh" id="btnAcceptAll" onclick="acceptAllSuggestions()">Accept all high-confidence</button>
                     </div>
                 </div>
                 <div class="table-responsive-container">
@@ -366,14 +388,29 @@
                 </div>
             </section>
 
-            <section class="table-card">
+            <section class="table-card" id="payDiscoverCard" hidden>
+                <div class="table-header">
+                    <div>
+                        <div class="table-title">Deposits we noticed</div>
+                        <div class="table-subtitle">Money that arrives on a steady schedule and isn't tied to a pay source yet. Make the paychecks into pay sources; dismiss the rest.</div>
+                    </div>
+                </div>
+                <div class="table-responsive-container">
+                    <table class="txn-table income-table">
+                        <thead><tr><th>From</th><th>Repeats</th><th style="text-align:right;">Usual amount</th><th>Deposits</th><th>Next expected</th><th></th></tr></thead>
+                        <tbody id="payDiscoverBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="table-card" id="paySourcesCard">
                 <div class="table-header">
                     <div>
                         <div class="table-title">Pay sources</div>
                         <div class="table-subtitle" id="planningLine"></div>
                     </div>
                     <div class="table-header-actions">
-                        <button class="btn-refresh" onclick="openSourceModal(null)">+ Add pay source</button>
+                        <button class="btn-refresh" id="btnAddSource" onclick="openSourceModal(null)">+ Add pay source</button>
                     </div>
                 </div>
                 <div class="table-responsive-container">
@@ -1085,47 +1122,33 @@
             <div class="modal-body">
                 <div class="settings-section">
                     <label class="settings-label">Color Theme</label>
-                    <div class="theme-options-grid">
-                        <!-- Dark Theme Option -->
-                        <div class="theme-card" id="themeCardDark" onclick="applyTheme('dark')">
-                            <div class="theme-preview dark-preview">
-                                <span class="preview-dot" style="background: #3b82f6;"></span>
-                                <span class="preview-dot" style="background: #10b981;"></span>
-                                <span class="preview-dot" style="background: #ef4444;"></span>
-                            </div>
-                            <div class="theme-info">
-                                <div class="theme-name">Dark</div>
-                                <div class="theme-desc">Modern midnight slate dark mode with high-contrast neon accents</div>
-                            </div>
-                            <span class="theme-check" id="themeCheckDark">✓</span>
-                        </div>
-
-                        <!-- Greenback Theme Option -->
-                        <div class="theme-card" id="themeCardGreenback" onclick="applyTheme('greenback')">
-                            <div class="theme-preview greenback-preview">
-                                <span class="preview-dot" style="background: #22c55e;"></span>
-                                <span class="preview-dot" style="background: #38bdf8;"></span>
-                                <span class="preview-dot" style="background: #facc15;"></span>
-                            </div>
-                            <div class="theme-info">
-                                <div class="theme-name">Greenback</div>
-                                <div class="theme-desc">Modern US currency palette: engraved bill forest green, gold seal, and 3D ribbon cyan</div>
-                            </div>
-                            <span class="theme-check" id="themeCheckGreenback">✓</span>
-                        </div>
-
-                        <!-- Ledger Theme Option -->
-                        <div class="theme-card" id="themeCardLedger" onclick="applyTheme('ledger')">
-                            <div class="theme-preview ledger-preview">
-                                <span class="preview-dot" style="background: #15803d;"></span>
-                                <span class="preview-dot" style="background: #1d4ed8;"></span>
-                                <span class="preview-dot" style="background: #b91c1c;"></span>
-                            </div>
-                            <div class="theme-info">
-                                <div class="theme-name">Ledger</div>
-                                <div class="theme-desc">Bank accounting ledger: warm cream paper, ruled ink borders, and credit/debit accents</div>
-                            </div>
-                            <span class="theme-check" id="themeCheckLedger">✓</span>
+                    <div class="theme-select" id="themeSelect">
+                        <button type="button" class="theme-select-btn" id="themeSelectBtn" aria-haspopup="listbox" aria-expanded="false" onclick="toggleThemeMenu(event)">
+                            <span class="theme-preview" id="themeSelectPreview"></span>
+                            <span class="theme-info"><span class="theme-name" id="themeSelectName"></span><span class="theme-desc" id="themeSelectDesc"></span></span>
+                            <span class="theme-caret">&#9662;</span>
+                        </button>
+                        <div class="theme-menu" id="themeMenu" role="listbox" hidden>
+                            <button type="button" role="option" class="theme-card" id="themeCardDark" onclick="pickTheme('dark')">
+                                <span class="theme-preview dark-preview"><span class="preview-dot" style="background: #3b82f6;"></span><span class="preview-dot" style="background: #10b981;"></span><span class="preview-dot" style="background: #ef4444;"></span></span>
+                                <span class="theme-info"><span class="theme-name">Dark</span><span class="theme-desc">Modern midnight slate dark mode with high-contrast neon accents</span></span>
+                                <span class="theme-check">&#10003;</span>
+                            </button>
+                            <button type="button" role="option" class="theme-card" id="themeCardGreenback" onclick="pickTheme('greenback')">
+                                <span class="theme-preview greenback-preview"><span class="preview-dot" style="background: #22c55e;"></span><span class="preview-dot" style="background: #38bdf8;"></span><span class="preview-dot" style="background: #facc15;"></span></span>
+                                <span class="theme-info"><span class="theme-name">Greenback</span><span class="theme-desc">Modern US currency palette: engraved bill forest green, gold seal, and 3D ribbon cyan</span></span>
+                                <span class="theme-check">&#10003;</span>
+                            </button>
+                            <button type="button" role="option" class="theme-card" id="themeCardLedger" onclick="pickTheme('ledger')">
+                                <span class="theme-preview ledger-preview"><span class="preview-dot" style="background: #15803d;"></span><span class="preview-dot" style="background: #1d4ed8;"></span><span class="preview-dot" style="background: #b91c1c;"></span></span>
+                                <span class="theme-info"><span class="theme-name">Ledger</span><span class="theme-desc">Bank accounting ledger: warm cream paper, ruled ink borders, and credit/debit accents</span></span>
+                                <span class="theme-check">&#10003;</span>
+                            </button>
+                            <button type="button" role="option" class="theme-card" id="themeCardDisney" onclick="pickTheme('disney')">
+                                <span class="theme-preview disney-preview"><span class="preview-dot" style="background: #e11d2e;"></span><span class="preview-dot" style="background: #fbbf24;"></span><span class="preview-dot" style="background: #60a5fa;"></span></span>
+                                <span class="theme-info"><span class="theme-name">Disney</span><span class="theme-desc">Castle-night royal blue with golden sparkle and classic Mickey red</span></span>
+                                <span class="theme-check">&#10003;</span>
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -1139,6 +1162,13 @@
                         <button type="button" class="btn-modal-cancel" id="btnRemovePin" onclick="removeBudgetPin()" hidden>Remove PIN</button>
                     </div>
                     <div class="import-hint">The PIN is asked for when this budget is opened. It keeps others out by accident; it does not encrypt your files. Forgot it? Delete pin.json in this budget's folder.</div>
+                </div>
+                <div class="settings-section" id="walkthroughSettingsSection">
+                    <label class="settings-label">Setup walkthrough</label>
+                    <div class="settings-pin-row">
+                        <span class="import-hint" style="flex: 1;">Walks you through importing, pay sources, envelopes, bills, and go-live, one step at a time.</span>
+                        <button type="button" class="btn-modal-save" onclick="closeSettingsModal(); wtStart(true);">Restart walkthrough</button>
+                    </div>
                 </div>
                 <div class="settings-section" id="budgetSettingsSection">
                     <label class="settings-label">Budget settings</label>
@@ -1542,6 +1572,41 @@
         </div>
     </div>
 
+    <!-- Update -->
+    <div class="modal-overlay" id="updateOverlay">
+        <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="updTitle" style="max-width: 460px;">
+            <div class="modal-header">
+                <div class="modal-title-wrap"><div class="modal-title" id="updTitle">Update</div></div>
+                <button class="modal-close-btn" onclick="closeUpdateDialog()" title="Close">&times;</button>
+            </div>
+            <div class="modal-body" id="updBody"></div>
+            <div class="modal-footer">
+                <div class="modal-footer-msg"></div>
+                <div class="modal-actions" id="updActions"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- What's new -->
+    <div class="modal-overlay" id="whatsNewOverlay" onclick="if (event.target === this) closeWhatsNew()">
+        <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="relTitle" style="max-width: 560px;">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title" id="relTitle">What's new</div>
+                    <div class="modal-subtitle" id="relSub"></div>
+                </div>
+                <button class="modal-close-btn" onclick="closeWhatsNew()" title="Close">&times;</button>
+            </div>
+            <div class="modal-body" id="relBody"></div>
+            <div class="modal-footer">
+                <button type="button" class="btn-modal-cancel" onclick="closeWhatsNew(); submitFeedback()" style="margin-right: auto;">Send feedback</button>
+                <div class="modal-actions">
+                    <button type="button" class="btn-modal-save" id="relDone" onclick="closeWhatsNew()">Got it</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Go-live wizard -->
     <div class="modal-overlay" id="goLiveModalOverlay">
         <div class="modal-container wide" role="dialog" aria-modal="true">
@@ -1557,7 +1622,8 @@
                     <label for="goLiveDate">Go-live date</label>
                     <input type="date" id="goLiveDate" class="input-date">
                 </div>
-                <div class="match-help">Read each envelope's current balance from your old budgeting app by hand and type it in. Use a minus sign for an overspent envelope. Whatever isn't in an envelope goes in Unallocated.</div>
+                <div class="match-help">Moving from another budgeting app? Type in each envelope's current balance from there. Use a minus sign for an overspent envelope.<br>
+                    New to envelopes? Start with your checking balance <strong>minus what you owe on credit cards today</strong> (that money is already spent). Put money in envelopes with bills due soon first. Whatever isn't in an envelope goes in Unallocated.</div>
                 <div class="table-responsive-container rules-table-wrap">
                     <table class="txn-table income-table">
                         <thead><tr><th>Envelope</th><th style="text-align:right;">Monthly budget</th><th style="width: 170px;">Opening balance ($)</th></tr></thead>
@@ -1630,7 +1696,8 @@
                 <div class="modal-form-grid">
                     <div class="field-group">
                         <label for="sourcePerson">Person</label>
-                        <select id="sourcePerson" class="select-input"></select>
+                        <select id="sourcePerson" class="select-input" onchange="onSourcePersonChange()"></select>
+                        <input type="text" id="sourceNewPerson" class="input-text" placeholder="Their name" maxlength="40" hidden style="margin-top: 6px;">
                     </div>
                     <div class="field-group">
                         <label for="sourceName">Name</label>
@@ -1987,5 +2054,8 @@
     <script src="/web/js/audit.js"></script>
     <script src="/web/js/profiles.js"></script>
     <script src="/web/js/cardbills.js"></script>
+    <script src="/web/js/walkthrough.js"></script>
+    <script src="/web/js/releases.js"></script>
+    <script src="/web/js/updates.js"></script>
 </body>
 </html>

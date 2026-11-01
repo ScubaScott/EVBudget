@@ -4,6 +4,8 @@ import mimetypes
 import os
 import threading
 import time
+import secrets
+import sys
 import traceback
 from datetime import datetime, timedelta
 from email.parser import BytesParser
@@ -11,6 +13,7 @@ from email.policy import HTTP as HTTP_POLICY
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import VERSION, audit, billmatch, budget, cardbills, cards, import_engine, ledger, income, paths, recurrence, reclassify, rule_engine, rules, store
+from . import income_discovery, releases, updater, walkthrough
 from . import profiles as profiles_mod
 from . import envelopes as env_mod
 from .http_util import HttpError, Request, Response, Router
@@ -110,6 +113,10 @@ class App:
         self._page_ever_seen = False
         self._empty_since: Optional[float] = None
         self._pages_lock = threading.Lock()
+        # A new value on every start, so a page can tell a restarted server from the old one
+        self.boot_id = secrets.token_hex(6)
+        self.port: Optional[int] = None
+        self.updater = updater.Updater(paths.ROOT_DIR)
 
     @staticmethod
     def _open_only(value: Optional[str]) -> str:
@@ -293,7 +300,7 @@ class App:
         return {"success": True}
 
     def health(self, req: Request) -> Dict[str, Any]:
-        return {"status": "ok", "version": f"{VERSION:.1f}", "budget": self.profile_name}
+        return {"status": "ok", "version": f"{VERSION:.1f}", "budget": self.profile_name, "boot": self.boot_id}
 
     # ----------------------------------------------------------- transactions
 
@@ -1118,6 +1125,98 @@ class App:
         finally:
             conn.close()
 
+    def discover_pay_sources(self, req: Request) -> Any:
+        return self._run(lambda c: {"candidates": income_discovery.discover_pay_sources(c)})
+
+    def dismiss_pay_source_candidate(self, req: Request) -> Any:
+        key = str(req.json().get("key") or "")
+        return self._run(lambda c: (income_discovery.dismiss(c, key), {"success": True})[1])
+
+    # ------------------------------------------------- updates and feedback
+
+    @staticmethod
+    def _need_json(req: Request) -> None:
+        # A JSON body is something another website can't send here without being refused
+        if "application/json" not in req.content_type:
+            raise HttpError(400, "Expected JSON")
+
+    def update_status(self, req: Request) -> Any:
+        return self.updater.status()
+
+    def update_check(self, req: Request) -> Any:
+        self._need_json(req)
+        self.updater.check_async()
+        return dict(self.updater.status(), checking=True)
+
+    def update_apply(self, req: Request) -> Any:
+        self._need_json(req)
+        try:
+            return dict(self.updater.apply(), success=True)
+        except updater.UpdateError as exc:
+            raise HttpError(400, str(exc))
+
+    def update_restart(self, req: Request) -> Any:
+        self._need_json(req)
+        if self.request_shutdown is None or not self.port:
+            raise HttpError(400, "This server can't be restarted from the page.")
+        script = os.path.join(paths.ROOT_DIR, "budget_dashboard.py")
+        try:
+            updater.spawn_restart(script, self.port, sys.argv[1:])
+        except OSError as exc:
+            raise HttpError(400, f"Couldn't start the new copy: {exc}")
+        self.request_shutdown()
+        return {"success": True}
+
+    def feedback_open(self, req: Request) -> Any:
+        self._need_json(req)
+        body = str(req.json().get("body") or "")[:6000]
+        try:
+            releases.open_external(releases.feedback_url(body))
+        except OSError as exc:
+            raise HttpError(400, f"Couldn't open your email app: {exc}")
+        return {"success": True}
+
+    # ------------------------------------------------- what's new
+
+    def releases_get(self, req: Request) -> Any:
+        def work(c):
+            status, state = walkthrough.get_status(c), walkthrough.get_state(c)
+            brand_new = walkthrough.should_auto_start(state, status)
+            return releases.payload(c, brand_new)
+        return self._run(work)
+
+    def releases_seen(self, req: Request) -> Any:
+        version = req.json().get("version")
+
+        def work(c):
+            try:
+                releases.mark_seen(c, version)
+            except ValueError as exc:
+                raise env_mod.ValidationError(str(exc))
+            return {"success": True}
+        return self._run(work)
+
+    def about_get(self, req: Request) -> Any:
+        return self._run(releases.about)
+
+    # ------------------------------------------------- setup walkthrough
+
+    def walkthrough_get(self, req: Request) -> Any:
+        def work(c):
+            state, status = walkthrough.get_state(c), walkthrough.get_status(c)
+            return {"state": state, "status": status, "auto_start": walkthrough.should_auto_start(state, status)}
+        return self._run(work)
+
+    def walkthrough_save(self, req: Request) -> Any:
+        data = req.json()
+
+        def work(c):
+            try:
+                return {"success": True, "state": walkthrough.save_state(c, data)}
+            except walkthrough.StateError as exc:
+                raise env_mod.ValidationError(str(exc))
+        return self._run(work)
+
     def income_summary(self, req: Request) -> Any:
         today = datetime.now().date()
         start = to_iso_date(req.query.get("from", "")) or f"{today.year}-01-01"
@@ -1510,6 +1609,18 @@ class App:
         r.add("POST", "/api/income/sources/save", self.save_income_source)
         r.add("POST", "/api/income/sources/delete", self.delete_income_source)
         r.add("GET", "/api/income/summary", self.income_summary)
+        r.add("GET", "/api/income/discover", self.discover_pay_sources)
+        r.add("POST", "/api/income/discover/dismiss", self.dismiss_pay_source_candidate)
+        r.add("GET", "/api/update/status", self.update_status)
+        r.add("POST", "/api/update/check", self.update_check)
+        r.add("POST", "/api/update/apply", self.update_apply)
+        r.add("POST", "/api/update/restart", self.update_restart)
+        r.add("POST", "/api/feedback/open", self.feedback_open)
+        r.add("GET", "/api/releases", self.releases_get)
+        r.add("POST", "/api/releases/seen", self.releases_seen)
+        r.add("GET", "/api/about", self.about_get)
+        r.add("GET", "/api/walkthrough", self.walkthrough_get)
+        r.add("POST", "/api/walkthrough", self.walkthrough_save)
         r.add("GET", "/api/rules", self.get_rules)
         r.add("POST", "/api/rules/save", self.save_rule)
         r.add("POST", "/api/rules/delete", self.delete_rule)

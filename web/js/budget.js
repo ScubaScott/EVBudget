@@ -12,6 +12,8 @@ document.addEventListener('tabchange', (e) => {
     if (e.detail.tab === 'budget') loadBudget();
 });
 document.addEventListener('settingsopen', loadBudgetSettings);
+// Envelopes added or renamed in the envelope manager (it has a button on this tab too)
+document.addEventListener('txnsrefreshed', () => { if (budgetLoaded && activeTab === 'budget') reloadBudgetKeepTemplates().catch(() => {}); });
 document.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') { closeBillsModal(); closeGoLiveModal(); }
@@ -417,11 +419,8 @@ async function templateSave(sid) {
 // ---------------------------------------------------------------------
 function openGoLiveModal() {
     const live = setupStatus.go_live_date;
-    let date = live;
-    if (!date) {
-        const t = new Date();
-        date = toInputDateFormat(new Date(t.getFullYear(), t.getMonth() + 1, 1));
-    }
+    // Today by default, so balances show up straight away
+    const date = live || toInputDateFormat(new Date());
     document.getElementById('goLiveDate').value = date;
     const rows = budgetData.envelopes.filter(e => e.active).map(e => ({ id: e.id, name: e.name, budget: e.effective_budget }));
     rows.push({ id: setupStatus.unallocated_id, name: 'Unallocated', budget: null });

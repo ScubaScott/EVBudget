@@ -1,0 +1,17 @@
+[
+  {
+    "version": "3.5",
+    "date": "2026-11-01",
+    "title": "Setup walkthrough, themes, and feedback",
+    "notes": [
+      "New setup walkthrough: a guide that takes you from an empty budget to a working one, step by step. Open it any time from Help.",
+      "Deposits we noticed: the Income tab now spots repeating paychecks and turns them into pay sources with one click.",
+      "You can add a new person right inside the pay source dialog.",
+      "Manage envelopes is now on the Budget tab, so you can set up envelopes before go-live.",
+      "Go-live now starts today by default, so balances show up right away.",
+      "New Disney color theme, and the theme picker in Settings is now a dropdown.",
+      "A divider now separates Spending, Bills, and Goals on the Envelopes screen.",
+      "Help now has What's new (this list) and Submit feedback."
+    ]
+  }
+]

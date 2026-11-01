@@ -1,3 +1,3 @@
 """EVBudget: local envelope budgeting dashboard (standard library only)."""
 
-VERSION = 3.4
+VERSION = 3.5

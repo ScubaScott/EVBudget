@@ -31,21 +31,23 @@ function personName(id) {
 // ---------------------------------------------------------------------
 // Theme
 // ---------------------------------------------------------------------
+const THEMES = ['dark', 'greenback', 'ledger', 'disney'];
 let currentTheme = 'dark';
 try { currentTheme = localStorage.getItem('budget_dashboard_theme') || 'dark'; } catch (e) { /* storage blocked */ }
 
 function applyTheme(themeName) {
-    if (!['dark', 'greenback', 'ledger'].includes(themeName)) {
+    if (!THEMES.includes(themeName)) {
         themeName = 'dark';
     }
     currentTheme = themeName;
     document.documentElement.setAttribute('data-theme', themeName);
     try { localStorage.setItem('budget_dashboard_theme', themeName); } catch (e) { /* storage blocked */ }
 
-    ['dark', 'greenback', 'ledger'].forEach(t => {
+    THEMES.forEach(t => {
         const card = document.getElementById('themeCard' + t.charAt(0).toUpperCase() + t.slice(1));
         if (card) card.classList.toggle('active', t === themeName);
     });
+    syncThemeSelect();
 
     document.dispatchEvent(new CustomEvent('themechange'));
 }
@@ -57,11 +59,42 @@ function getThemeChartColors() {
         tickColor: isLedger ? '#4a5b51' : (isGreenback ? '#86efac' : '#94a3b8'),
         gridColor: isLedger ? 'rgba(74, 91, 82, 0.15)' : (isGreenback ? 'rgba(134, 239, 172, 0.12)' : 'rgba(38, 51, 82, 0.4)'),
         gridSubtleColor: isLedger ? 'rgba(74, 91, 82, 0.1)' : (isGreenback ? 'rgba(134, 239, 172, 0.08)' : 'rgba(38, 51, 82, 0.2)'),
-        borderColor: isLedger ? '#fdfcf7' : (isGreenback ? '#12291e' : '#151d30')
+        borderColor: isLedger ? '#fdfcf7' : (isGreenback ? '#12291e' : (currentTheme === 'disney' ? '#14275a' : '#151d30'))
     };
 }
 
+// The theme dropdown shows the chosen theme's preview, name, and description; the list holds every theme
+function syncThemeSelect() {
+    const card = document.getElementById('themeCard' + currentTheme.charAt(0).toUpperCase() + currentTheme.slice(1));
+    const preview = document.getElementById('themeSelectPreview');
+    if (!card || !preview) return;
+    preview.className = card.querySelector('.theme-preview').className;
+    preview.innerHTML = card.querySelector('.theme-preview').innerHTML;
+    document.getElementById('themeSelectName').textContent = card.querySelector('.theme-name').textContent;
+    document.getElementById('themeSelectDesc').textContent = card.querySelector('.theme-desc').textContent;
+}
+
+function setThemeMenu(open) {
+    const menu = document.getElementById('themeMenu');
+    if (!menu) return;
+    menu.hidden = !open;
+    document.getElementById('themeSelectBtn').setAttribute('aria-expanded', String(open));
+}
+
+function toggleThemeMenu(e) {
+    e.stopPropagation();
+    setThemeMenu(document.getElementById('themeMenu').hidden);
+}
+
+function pickTheme(name) {
+    applyTheme(name);
+    setThemeMenu(false);
+}
+
+document.addEventListener('click', (e) => { if (!e.target.closest('#themeSelect')) setThemeMenu(false); });
+
 function openSettingsModal() {
+    setThemeMenu(false);
     applyTheme(currentTheme);
     document.getElementById('settingsModalOverlay').classList.add('active');
     document.body.style.overflow = 'hidden';

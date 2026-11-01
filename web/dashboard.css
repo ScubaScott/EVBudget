@@ -10,6 +10,7 @@
       and 3D security ribbon cyan
    3. Ledger: Classic bank accounting ledger with warm ivory parchment,
       fine ruled borders, dark ink typography, and credit/debit accents
+   4. Disney: Castle-night royal blue with golden sparkle and Mickey red
    --------------------------------------------------------------------- */
 
 :root,
@@ -110,6 +111,39 @@
     --shadow-modal: 0 16px 36px -6px rgba(40, 35, 20, 0.22);
     --chart-grid: rgba(74, 91, 82, 0.15);
     --chart-tick: #4a5b51;
+}
+
+[data-theme="disney"] {
+    --bg-body: #0a1330;
+    --bg-header: linear-gradient(180deg, #1b3a8a 0%, #12275f 100%);
+    --bg-card: #14275a;
+    --bg-card-subtle: #1b3270;
+    --bg-card-hover: #234088;
+    --bg-input: #0e1d47;
+    --bg-footer: #0c1838;
+    --border-color: #2f4a96;
+    --border-focus: #fbbf24;
+    --border-subtle: #1f3578;
+    --text-main: #fffdf5;
+    --text-muted: #b9c7f0;
+    --text-dim: #8497cf;
+    --accent-blue: #60a5fa;
+    --accent-green: #34d399;
+    --accent-red: #f43f5e;
+    --accent-teal: #22d3ee;
+    --accent-purple: #c084fc;
+    --accent-amber: #fbbf24;
+    --table-header-bg: #1a3170;
+    --table-row-even: #112250;
+    --table-row-hover: rgba(251, 191, 36, 0.12);
+    --modal-bg: #14275a;
+    --modal-overlay: rgba(4, 9, 28, 0.8);
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --shadow-card: 0 4px 20px -2px rgba(0, 5, 30, 0.55);
+    --shadow-modal: 0 20px 40px -8px rgba(0, 4, 24, 0.8);
+    --chart-grid: rgba(185, 199, 240, 0.14);
+    --chart-tick: #b9c7f0;
 }
 
 /* ---------------------------------------------------------------------
@@ -1548,6 +1582,69 @@ table.txn-table tr.excluded-row td {
     border-color: #d6ceb8;
 }
 
+.disney-preview {
+    background: linear-gradient(135deg, #1b3a8a, #0a1330);
+    border-color: #fbbf24;
+}
+
+/* Theme dropdown: the button shows the chosen theme, the list opens beneath it */
+.theme-select {
+    position: relative;
+}
+
+.theme-select-btn {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    padding: 12px 16px;
+    border-radius: var(--radius-md);
+    background: var(--bg-card-subtle);
+    border: 2px solid var(--border-color);
+    color: var(--text-main);
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.theme-select-btn:hover,
+.theme-select-btn[aria-expanded="true"] {
+    border-color: var(--border-focus);
+}
+
+.theme-caret {
+    color: var(--text-muted);
+    font-size: 14px;
+}
+
+.theme-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-modal);
+}
+
+.theme-menu[hidden] {
+    display: none;
+}
+
+.theme-menu .theme-card {
+    width: 100%;
+    font-family: inherit;
+    text-align: left;
+    color: var(--text-main);
+    padding: 10px 12px;
+}
+
 .theme-info {
     flex: 1;
     display: flex;
@@ -2789,12 +2886,21 @@ footer.app-footer {
 }
 
 .env-group {
-    margin-top: 12px;
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-color);
     font-size: 12px;
     font-weight: 700;
     letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--text-muted);
+}
+
+/* The first heading starts the list, so it needs no divider above it */
+.env-group:first-child {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
 }
 
 .env-row {
@@ -3535,3 +3641,415 @@ button.kind-link:focus-visible {
 
 .envelope-row.env-dragging { opacity: 0.45; }
 .envelope-row.env-drop-target { box-shadow: inset 0 3px 0 var(--accent-blue); }
+
+/* ---------------------------------------------------------------------
+   Setup walkthrough: floating guide panel, its minimized pill, the ring
+   around the control to use, the welcome dialog, and the Help menu
+   (above dialogs at 200, below the toast at 300)
+   --------------------------------------------------------------------- */
+.wt-help-wrap {
+    position: relative;
+}
+
+.wt-help-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    min-width: 260px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-modal);
+    padding: 6px;
+    z-index: 260;
+    display: flex;
+    flex-direction: column;
+}
+
+.wt-help-menu[hidden] {
+    display: none;
+}
+
+.wt-help-menu button {
+    background: none;
+    border: none;
+    color: var(--text-main);
+    text-align: left;
+    padding: 9px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+.wt-help-menu button:hover,
+.wt-help-menu button:focus-visible {
+    background: var(--bg-card-hover);
+}
+
+.wt-panel {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    width: 340px;
+    max-height: calc(100vh - 40px);
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-card);
+    color: var(--text-main);
+    border: 1px solid var(--border-focus);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-modal);
+    z-index: 250;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.wt-panel[style*="top"] {
+    right: auto;
+    bottom: auto;
+}
+
+.wt-panel[hidden],
+.wt-pill[hidden],
+.wt-ring[hidden],
+.wt-welcome[hidden] {
+    display: none;
+}
+
+.wt-head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 10px 8px 14px;
+    cursor: grab;
+    user-select: none;
+    touch-action: none;
+}
+
+.wt-head:active {
+    cursor: grabbing;
+}
+
+.wt-progress {
+    flex: 1;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.wt-icon-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 18px;
+    line-height: 1;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.wt-icon-btn:hover,
+.wt-icon-btn:focus-visible {
+    background: var(--bg-card-hover);
+    color: var(--text-main);
+}
+
+.wt-track {
+    height: 3px;
+    background: var(--border-subtle);
+    margin: 0 14px;
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.wt-bar {
+    height: 100%;
+    background: var(--accent-blue);
+    transition: width 0.3s ease;
+}
+
+.wt-body {
+    padding: 12px 14px 4px;
+    overflow-y: auto;
+}
+
+.wt-title {
+    font-size: 15px;
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+
+.wt-text {
+    color: var(--text-main);
+}
+
+.wt-list {
+    margin: 6px 0 6px 18px;
+    padding: 0;
+}
+
+.wt-list li {
+    margin-bottom: 4px;
+}
+
+.wt-hint {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-left: 3px solid var(--accent-amber);
+    background: var(--bg-card-subtle);
+    border-radius: 0 6px 6px 0;
+}
+
+.wt-status {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.wt-status.done {
+    color: var(--accent-green);
+    font-weight: 600;
+}
+
+.wt-confirm {
+    margin-top: 10px;
+    padding: 10px;
+    background: var(--bg-card-subtle);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.wt-confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.wt-skipped {
+    margin-top: 10px;
+}
+
+.wt-foot {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 14px 14px;
+}
+
+.wt-foot [hidden] {
+    display: none;
+}
+
+.wt-link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent-blue);
+    font: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.wt-pill {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    z-index: 250;
+    padding: 9px 16px;
+    border-radius: 999px;
+    border: 1px solid var(--border-focus);
+    background: var(--accent-blue);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    font-family: inherit;
+    box-shadow: var(--shadow-card);
+    cursor: pointer;
+}
+
+.wt-ring {
+    position: fixed;
+    z-index: 240;
+    pointer-events: none;
+    border: 2px solid var(--accent-blue);
+    border-radius: 10px;
+    animation: wt-ring-pulse 1.8s ease-out infinite;
+}
+
+@keyframes wt-ring-pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-blue) 45%, transparent); }
+    100% { box-shadow: 0 0 0 12px color-mix(in srgb, var(--accent-blue) 0%, transparent); }
+}
+
+.wt-pulse {
+    animation: wt-next-pulse 0.9s ease-out 2;
+}
+
+@keyframes wt-next-pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-green) 60%, transparent); }
+    100% { box-shadow: 0 0 0 10px color-mix(in srgb, var(--accent-green) 0%, transparent); }
+}
+
+.wt-welcome {
+    position: fixed;
+    inset: 0;
+    z-index: 260;
+    background: var(--modal-overlay);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+}
+
+.wt-welcome-box {
+    width: 100%;
+    max-width: 460px;
+    background: var(--modal-bg);
+    color: var(--text-main);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-modal);
+    padding: 26px 26px 18px;
+    text-align: center;
+    line-height: 1.55;
+}
+
+.wt-welcome-title {
+    font-size: 22px;
+    font-weight: 800;
+    margin-bottom: 10px;
+}
+
+.wt-welcome-box p {
+    margin: 0 0 10px;
+}
+
+.wt-welcome-sub {
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.wt-welcome-actions {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    margin: 18px 0 12px;
+}
+
+.wt-welcome-hide {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+@media (max-width: 700px) {
+    .wt-panel,
+    .wt-panel[style*="top"] {
+        left: 8px;
+        right: 8px;
+        bottom: 8px;
+        top: auto;
+        width: auto;
+        max-height: 55vh;
+    }
+    .wt-head {
+        cursor: default;
+    }
+    .wt-pill {
+        right: 12px;
+        bottom: 12px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .wt-ring,
+    .wt-pulse {
+        animation: none;
+    }
+    .wt-bar {
+        transition: none;
+    }
+}
+
+/* What's new popup and the Help menu divider */
+.wt-help-sep {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--border-color);
+}
+
+.rel-entry {
+    padding-bottom: 14px;
+    margin-bottom: 14px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.rel-entry:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+    padding-bottom: 0;
+}
+
+.rel-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.rel-version {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent-blue);
+}
+
+.rel-date {
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+.rel-name {
+    font-size: 16px;
+    font-weight: 700;
+    margin: 4px 0 8px;
+}
+
+.rel-notes {
+    margin: 0 0 0 18px;
+    padding: 0;
+    line-height: 1.5;
+    color: var(--text-main);
+}
+
+.rel-notes li {
+    margin-bottom: 6px;
+}
+
+/* Update available / restart button in the header */
+.update-chip {
+    background: var(--accent-amber);
+    border-color: var(--accent-amber);
+    color: #1b1300;
+    font-weight: 700;
+}
+
+.update-chip:hover {
+    background: var(--accent-amber);
+    filter: brightness(1.08);
+}
+
+.update-chip.update-chip-restart {
+    background: var(--accent-green);
+    border-color: var(--accent-green);
+    color: #04210f;
+}
+
+.update-chip[hidden] {
+    display: none;
+}

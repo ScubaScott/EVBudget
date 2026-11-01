@@ -70,8 +70,58 @@ async function loadIncome() {
         renderIncomeCharts();
         renderIncomeManager();
         renderIncomeTxns();
+        loadPayDiscovery();
     } catch (err) {
         showToast('Could not load income: ' + err.message, true);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Deposits we noticed: steady deposits that aren't a pay source yet
+// ---------------------------------------------------------------------
+let payDiscoverList = [];
+
+function payScheduleText(freq, interval) {
+    const unit = FREQ_LABELS[freq] || freq;
+    return interval > 1 ? `Every ${interval} ${unit}s` : `Every ${unit}`;
+}
+
+async function loadPayDiscovery() {
+    try {
+        payDiscoverList = (await api('/api/income/discover')).candidates;
+    } catch (err) {
+        payDiscoverList = [];
+    }
+    document.getElementById('payDiscoverCard').hidden = payDiscoverList.length === 0;
+    document.getElementById('payDiscoverBody').innerHTML = payDiscoverList.map((c, i) => `<tr>
+        <td><div style="font-weight:500;">${escapeHtml(c.name)}</div><div style="font-size:11px;color:var(--text-dim);">Matches "${escapeHtml(c.match_phrase)}"</div></td>
+        <td>${payScheduleText(c.freq, c.interval)}${c.confidence === 'high' ? '' : ' <span class="kind-badge kind-review">Check</span>'}</td>
+        <td class="amount-cell amount-income">${formatCurrency(c.typical_amount)}</td>
+        <td>${c.deposits} (last ${formatDisplayDate(c.last_date)})</td>
+        <td>${c.next_date ? formatDisplayDate(c.next_date) : '&mdash;'}</td>
+        <td style="white-space:nowrap; text-align:right;">
+            <button type="button" class="btn-refresh" onclick="makeSourceFromDiscovered(${i})">Make pay source</button>
+            <button type="button" class="btn-refresh" onclick="dismissPayDiscovered(${i})" title="This isn't a paycheck">Dismiss</button>
+        </td></tr>`).join('');
+}
+
+function makeSourceFromDiscovered(i) {
+    const c = payDiscoverList[i];
+    if (!c) return;
+    openSourceModal(null, {
+        name: c.suggested_name, match_phrase: c.match_phrase, cadence_freq: c.freq,
+        cadence_interval: c.interval, cadence_anchor_date: c.last_date
+    });
+}
+
+async function dismissPayDiscovered(i) {
+    const c = payDiscoverList[i];
+    if (!c) return;
+    try {
+        await apiPost('/api/income/discover/dismiss', { key: c.key });
+        loadPayDiscovery();
+    } catch (err) {
+        showToast(err.message, true);
     }
 }
 
@@ -295,17 +345,26 @@ async function savePerson() {
     }
 }
 
-function openSourceModal(id) {
+const NEW_PERSON = '__new';
+
+// prefill: starting values for a new source (from "Deposits we noticed")
+function openSourceModal(id, prefill) {
     const s = incomeSources.find(x => x.id === id);
     const isNew = !s;
+    const f = s || prefill || {};
+    const people = incomePeople.filter(p => p.active || (s && s.person_id === p.id));
     document.getElementById('sourceId').value = s ? s.id : '';
-    document.getElementById('sourcePerson').innerHTML = incomePeople.filter(p => p.active || (s && s.person_id === p.id))
-        .map(p => `<option value="${p.id}" ${s && s.person_id === p.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('');
-    document.getElementById('sourceName').value = s ? s.name : '';
-    document.getElementById('sourcePhrase').value = s ? s.match_phrase : '';
-    document.getElementById('sourceFreq').value = s ? s.cadence_freq : 'weekly';
-    document.getElementById('sourceInterval').value = s ? s.cadence_interval : 2;
-    document.getElementById('sourceAnchor').value = s && s.cadence_anchor_date ? s.cadence_anchor_date : '';
+    document.getElementById('sourcePerson').innerHTML = people
+        .map(p => `<option value="${p.id}" ${s && s.person_id === p.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')
+        + `<option value="${NEW_PERSON}" ${people.length === 0 ? 'selected' : ''}>+ New person&hellip;</option>`;
+    document.getElementById('sourceNewPerson').value = '';
+    onSourcePersonChange();
+    document.getElementById('sourceName').value = f.name || '';
+    document.getElementById('sourcePhrase').value = f.match_phrase || '';
+    document.getElementById('sourceFreq').value = f.cadence_freq || 'weekly';
+    document.getElementById('sourceInterval').value = f.cadence_interval || 2;
+    document.getElementById('sourceAnchor').value = f.cadence_anchor_date || '';
+    onSourceFreqChange();
     document.getElementById('sourceTypical').value = s && s.typical_source === 'manual' ? s.typical : '';
     document.getElementById('sourceThreshold').value = s && s.bonus_threshold_pct ? s.bonus_threshold_pct : '';
     document.getElementById('sourceActive').checked = s ? !!s.active : true;
@@ -314,7 +373,29 @@ function openSourceModal(id) {
     document.getElementById('sourcePreview').textContent = '';
     document.getElementById('sourceModalOverlay').classList.add('active');
     document.body.style.overflow = 'hidden';
-    if (s) previewSourcePhrase();
+    if (f.match_phrase) previewSourcePhrase();
+}
+
+function onSourcePersonChange() {
+    const isNew = document.getElementById('sourcePerson').value === NEW_PERSON;
+    const input = document.getElementById('sourceNewPerson');
+    input.hidden = !isNew;
+    if (isNew) setTimeout(() => input.focus(), 50);
+}
+
+// The person picked in the dialog. "+ New person" creates them first.
+async function sourcePersonId() {
+    const sel = document.getElementById('sourcePerson');
+    if (sel.value !== NEW_PERSON) return sel.value;
+    const name = document.getElementById('sourceNewPerson').value.trim();
+    if (!name) throw new Error('Type the name of the person this pay is for.');
+    const res = await apiPost('/api/people/save', { name, color: '', active: 1 });
+    incomePeople.push({ id: res.id, name, color: '', active: 1 });
+    // Keep the new person selected, so a retry after a failed save doesn't add them twice
+    sel.insertAdjacentHTML('afterbegin', `<option value="${res.id}">${escapeHtml(name)}</option>`);
+    sel.value = String(res.id);
+    onSourcePersonChange();
+    return String(res.id);
 }
 
 function closeSourceModal() {
@@ -346,9 +427,10 @@ function onSourceFreqChange() {
 
 async function saveSource() {
     try {
+        const personId = await sourcePersonId();
         const res = await apiPost('/api/income/sources/save', {
             id: document.getElementById('sourceId').value || null,
-            person_id: document.getElementById('sourcePerson').value,
+            person_id: personId,
             name: document.getElementById('sourceName').value,
             match_phrase: document.getElementById('sourcePhrase').value,
             cadence_freq: document.getElementById('sourceFreq').value,
