@@ -12,13 +12,19 @@ let sourcePreviewTimer = null;
 
 const FREQ_LABELS = { weekly: 'week', monthly: 'month', yearly: 'year', once: 'once' };
 
-document.addEventListener('tabchange', (e) => {
-    if (e.detail.tab === 'income') {
-        incomeLoaded = true;
-        loadIncome();
-    }
-});
-document.addEventListener('themechange', () => { if (incomeData) renderIncomeCharts(); });
+// The Income view is part of the Spending & Income tab, so these only matter while it is showing
+function incomeViewActive() { return activeTab === 'analytics' && analyticsView === 'income'; }
+
+function showIncomeView() {
+    incomeLoaded = true;
+    loadIncome();
+}
+
+document.addEventListener('tabchange', (e) => { if (e.detail.tab === 'analytics' && analyticsView === 'income') showIncomeView(); });
+document.addEventListener('analyticsviewchange', (e) => { if (e.detail.view === 'income' && activeTab === 'analytics') showIncomeView(); });
+document.addEventListener('themechange', () => { if (incomeData && incomeViewActive()) renderIncomeCharts(); });
+// An edit made anywhere (e.g. in the transaction dialog) refreshes the income numbers
+document.addEventListener('txnsrefreshed', () => { if (incomeLoaded && incomeViewActive()) loadIncome(); });
 
 document.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('keydown', (e) => {
@@ -27,8 +33,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ---------------------------------------------------------------------
-// Filters: the Income tab uses the same filter bar as Spending. Its dates pick the range for the charts;
-// every filter (search, kind, person, ...) applies to the transaction list at the bottom.
+// Filters: the Income view uses the same filter bar as Spending. Its dates pick the range for the charts.
 // ---------------------------------------------------------------------
 let incomeRangeLoaded = '';
 
@@ -43,11 +48,9 @@ function incomeRange() {
 }
 
 document.addEventListener('filterschanged', () => {
-    if (!incomeLoaded || activeTab !== 'income') return;
-    incomeTxnLimit = 100;
+    if (!incomeLoaded || !incomeViewActive()) return;
     const r = incomeRange();
     if (`${r.from}|${r.to}` !== incomeRangeLoaded) loadIncome();   // new dates: charts need fresh numbers
-    else renderIncomeTxns();
 });
 
 // ---------------------------------------------------------------------
@@ -69,7 +72,6 @@ async function loadIncome() {
         renderIncomeKpis();
         renderIncomeCharts();
         renderIncomeManager();
-        renderIncomeTxns();
         loadPayDiscovery();
     } catch (err) {
         showToast('Could not load income: ' + err.message, true);
@@ -460,71 +462,5 @@ async function deleteSource() {
         showToast(res.deactivated ? 'Switched off (it has paycheck history).' : 'Pay source removed.');
     } catch (err) {
         showToast(err.message, true);
-    }
-}
-
-
-// ---------------------------------------------------------------------
-// Income transactions (same timeframe as the rest of the tab)
-// ---------------------------------------------------------------------
-let incomeTxnFilter = 'all';
-let incomeTxnSort = { col: 'date', asc: false };
-let incomeTxnLimit = 100;
-
-// An edit made anywhere (e.g. in the dialog opened from this table) refreshes the tab
-document.addEventListener('txnsrefreshed', () => { if (incomeLoaded && activeTab === 'income') loadIncome(); });
-
-function setIncomeTxnFilter(f) {
-    incomeTxnFilter = f;
-    incomeTxnLimit = 100;
-    document.getElementById('incomeFilterAll').classList.toggle('active', f === 'all');
-    document.getElementById('incomeFilterPaycheck').classList.toggle('active', f === 'paycheck');
-    document.getElementById('incomeFilterOther').classList.toggle('active', f === 'other_income');
-    renderIncomeTxns();
-}
-
-function sortIncomeTxns(col) {
-    if (incomeTxnSort.col === col) incomeTxnSort.asc = !incomeTxnSort.asc;
-    else incomeTxnSort = { col, asc: col !== 'date' && col !== 'amount' };
-    ['date', 'name', 'person', 'type', 'amount'].forEach(c => {
-        const el = document.getElementById('isortinc_' + c);
-        if (el) el.textContent = c === incomeTxnSort.col ? (incomeTxnSort.asc ? '▲' : '▼') : '';
-    });
-    renderIncomeTxns();
-}
-
-function incomeTxnType(t) {
-    if (t.txn_kind === 'paycheck') return t.income_subtype === 'bonus' ? 'Bonus' : 'Paycheck';
-    return 'Other income' + (t.income_label ? ' · ' + t.income_label : '');
-}
-
-function renderIncomeTxns() {
-    // filteredTransactions already has the dates, search, kind, person, envelope and inclusion filters applied
-    const rows = filteredTransactions.filter(t =>
-        INCOME_KINDS.includes(t.txn_kind) && (incomeTxnFilter === 'all' || t.txn_kind === incomeTxnFilter));
-    const key = { date: t => t.date, name: t => (t.name || '').toLowerCase(), person: t => personName(t.person_id).toLowerCase(),
-        type: t => incomeTxnType(t).toLowerCase(), amount: t => t.amount }[incomeTxnSort.col];
-    const dir = incomeTxnSort.asc ? 1 : -1;
-    rows.sort((a, b) => (key(a) < key(b) ? -dir : key(a) > key(b) ? dir : 0));
-
-    const total = rows.reduce((sum, t) => sum + t.amount, 0);
-    document.getElementById('incomeTxnCount').textContent =
-        `${rows.length.toLocaleString()} transaction${rows.length === 1 ? '' : 's'} • ${formatCurrency(total)}`;
-
-    const shown = rows.slice(0, incomeTxnLimit);
-    document.getElementById('incomeTxnBody').innerHTML = shown.length === 0
-        ? '<tr><td colspan="5" class="import-more">No income matches the filters.</td></tr>'
-        : shown.map(t => `<tr data-id="${escapeHtml(t.txn_id)}" onclick="openEditModal(this.dataset.id)">
-            <td style="white-space:nowrap;">${escapeHtml(formatDisplayDate(t.date))}</td>
-            <td><div style="font-weight:500;">${escapeHtml(t.name)}</div>${t.raw_name && t.raw_name !== t.name ? `<div style="font-size:11px;color:var(--text-dim);">${escapeHtml(t.raw_name)}</div>` : ''}</td>
-            <td>${escapeHtml(personName(t.person_id)) || '<span class="import-muted">Not set</span>'}</td>
-            <td>${escapeHtml(incomeTxnType(t))}${t.needs_review ? ' <span class="kind-badge kind-review">Review</span>' : ''} ${fillBadgeMarkup(t)}</td>
-            <td class="amount-cell amount-income">${formatSigned(t.amount)}</td></tr>`).join('');
-
-    const more = document.getElementById('incomeTxnMore');
-    if (rows.length > shown.length) {
-        more.innerHTML = `<button type="button" class="btn-bulk-action" onclick="incomeTxnLimit += 200; renderIncomeTxns();">Show more (${rows.length - shown.length} hidden)</button>`;
-    } else {
-        more.textContent = rows.length ? 'All matching transactions shown.' : '';
     }
 }

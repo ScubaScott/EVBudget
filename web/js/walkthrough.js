@@ -40,7 +40,8 @@ const WT_STEPS = [
     },
     {
         id: 'pay_sources',
-        tab: 'income',
+        tab: 'analytics',
+        view: 'income',
         title: 'Where your paychecks come from',
         body: () => wtVisible('payDiscoverCard')
             ? `We found deposits that look like paychecks under <strong>Deposits we noticed</strong>. Click
@@ -226,13 +227,19 @@ function wtWelcomeChoice(choice) {
     wtGo(0, wtMinimized);
 }
 
+// Open the tab a step is about (and its Spending/Income view), unless it's already showing
+function wtShowStepTab(step) {
+    if (!step.tab || typeof showTab !== 'function') return;
+    if (activeTab !== step.tab || (step.view && analyticsView !== step.view)) showTab(step.tab, step.view);
+}
+
 // stayOnTab: show the step without switching tabs (resuming minimized, or "Not now")
 function wtGo(index, stayOnTab) {
     wtIndex = Math.max(0, Math.min(WT_STEPS.length - 1, index));
     wtConfirm = null;
     wtScrolledFor = null;
     const step = WT_STEPS[wtIndex];
-    if (!stayOnTab && step.tab && typeof showTab === 'function' && activeTab !== step.tab) showTab(step.tab);
+    if (!stayOnTab) wtShowStepTab(step);
     wtOpen = true;
     wtSave('active');
     wtRender();
@@ -296,7 +303,7 @@ function wtSetMinimized(min) {
     wtStore(WT_MIN_KEY, min ? '1' : null);
     // Opening the panel again goes back to the step's tab
     const step = WT_STEPS[wtIndex];
-    if (!min && step && step.tab && activeTab !== step.tab) { showTab(step.tab); wtScrolledFor = null; }
+    if (!min && step) { wtShowStepTab(step); wtScrolledFor = null; }
     wtRender();
 }
 

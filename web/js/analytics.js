@@ -304,7 +304,7 @@ function populatePeopleDropdowns() {
 
 // Jumps to spending and refunds since go-live that have no envelope
 function goToUncategorized() {
-    showTab('analytics');
+    showTab('analytics', 'spending');
     setInclusionFilter('included');
     document.getElementById('filterSearch').value = '';
     document.getElementById('filterPerson').value = '';
@@ -582,14 +582,6 @@ function onFilterChange() {
     resetAndRenderTable();
     document.dispatchEvent(new CustomEvent('filterschanged'));
 }
-
-// One filter bar serves both the Spending and Income tabs, so its values carry over when you switch.
-// There is only one copy in the page; it is moved into whichever of the two tabs is showing.
-document.addEventListener('tabchange', (e) => {
-    const slot = { analytics: 'filterSlotAnalytics', income: 'filterSlotIncome' }[e.detail.tab];
-    const bar = document.getElementById('sharedFilterBar');
-    if (slot && bar && bar.parentElement.id !== slot) document.getElementById(slot).appendChild(bar);
-});
 
 // Sorts the filteredTransactions list according to currentSortColumn & currentSortDirection
 function sortFilteredTransactions() {

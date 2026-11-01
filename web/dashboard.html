@@ -89,8 +89,7 @@
     <!-- Section tabs -->
     <nav class="app-tabs" aria-label="Sections">
         <button type="button" class="tab-btn active" id="tabBtn-envelopes" onclick="showTab('envelopes')">Envelopes</button>
-        <button type="button" class="tab-btn" id="tabBtn-analytics" onclick="showTab('analytics')">Spending</button>
-        <button type="button" class="tab-btn" id="tabBtn-income" onclick="showTab('income')">Income</button>
+        <button type="button" class="tab-btn" id="tabBtn-analytics" onclick="showTab('analytics')">Spending &amp; Income</button>
         <button type="button" class="tab-btn" id="tabBtn-budget" onclick="showTab('budget')">Budget</button>
         <button type="button" class="tab-btn" id="tabBtn-import" onclick="showTab('import')">Import</button>
     </nav>
@@ -350,135 +349,6 @@
             </section>
         </div>
 
-        <!-- ===================== INCOME TAB ===================== -->
-        <div class="tab-panel" id="tab-income" hidden>
-
-            <!-- The shared filter bar (search, dates, envelope, kind, person) is moved in here when this tab is open -->
-            <div id="filterSlotIncome"></div>
-
-            <section class="kpi-grid kpi-grid-wide" id="incomeKpis"></section>
-
-            <section class="charts-grid">
-                <div class="chart-card chart-card-full">
-                    <div class="chart-header">
-                        <div class="chart-title-area">
-                            <div class="chart-title">Monthly income by person</div>
-                            <div class="chart-subtitle" id="incomeMonthlySubtitle">Regular pay by person, bonuses, and other income</div>
-                        </div>
-                    </div>
-                    <div class="chart-canvas-container tall"><canvas id="chartIncomeMonthly"></canvas></div>
-                </div>
-                <div class="chart-card">
-                    <div class="chart-header">
-                        <div class="chart-title-area">
-                            <div class="chart-title">Paycheck trend</div>
-                            <div class="chart-subtitle">Each pay source over time &bull; &#9670; = bonus</div>
-                        </div>
-                    </div>
-                    <div class="chart-canvas-container"><canvas id="chartIncomeTrend"></canvas></div>
-                </div>
-                <div class="chart-card">
-                    <div class="chart-header">
-                        <div class="chart-title-area">
-                            <div class="chart-title">Income vs. spending</div>
-                            <div class="chart-subtitle">By month &bull; spending below zero &bull; line = net (income minus spending)</div>
-                        </div>
-                    </div>
-                    <div class="chart-canvas-container"><canvas id="chartIncomeVsSpend"></canvas></div>
-                </div>
-            </section>
-
-            <section class="table-card" id="payDiscoverCard" hidden>
-                <div class="table-header">
-                    <div>
-                        <div class="table-title">Deposits we noticed</div>
-                        <div class="table-subtitle">Money that arrives on a steady schedule and isn't tied to a pay source yet. Make the paychecks into pay sources; dismiss the rest.</div>
-                    </div>
-                </div>
-                <div class="table-responsive-container">
-                    <table class="txn-table income-table">
-                        <thead><tr><th>From</th><th>Repeats</th><th style="text-align:right;">Usual amount</th><th>Deposits</th><th>Next expected</th><th></th></tr></thead>
-                        <tbody id="payDiscoverBody"></tbody>
-                    </table>
-                </div>
-            </section>
-
-            <section class="table-card" id="paySourcesCard">
-                <div class="table-header">
-                    <div>
-                        <div class="table-title">Pay sources</div>
-                        <div class="table-subtitle" id="planningLine"></div>
-                    </div>
-                    <div class="table-header-actions">
-                        <button class="btn-refresh" id="btnAddSource" onclick="openSourceModal(null)">+ Add pay source</button>
-                    </div>
-                </div>
-                <div class="table-responsive-container">
-                    <table class="txn-table income-table">
-                        <thead>
-                            <tr>
-                                <th>Person</th><th>Source</th><th>Schedule</th>
-                                <th style="text-align:right;">Typical paycheck</th>
-                                <th style="text-align:right;">Per month</th>
-                                <th>Next pay</th><th></th>
-                            </tr>
-                        </thead>
-                        <tbody id="sourcesBody"></tbody>
-                    </table>
-                </div>
-            </section>
-
-            <section class="table-card">
-                <div class="table-header">
-                    <div>
-                        <div class="table-title">People</div>
-                        <div class="table-subtitle">Who income is tracked for.</div>
-                    </div>
-                    <div class="table-header-actions">
-                        <button class="btn-refresh" onclick="openPersonModal(null)">+ Add person</button>
-                    </div>
-                </div>
-                <div class="table-responsive-container">
-                    <table class="txn-table income-table">
-                        <thead><tr><th>Name</th><th>Status</th><th></th></tr></thead>
-                        <tbody id="peopleBody"></tbody>
-                    </table>
-                </div>
-            </section>
-
-            <section class="table-card">
-                <div class="table-header">
-                    <div>
-                        <div class="table-title">Income transactions</div>
-                        <div class="table-subtitle">Paychecks and other income matching the filters above. Click a row to view or edit it.</div>
-                    </div>
-                    <div class="table-header-actions">
-                        <div class="segmented-toggle">
-                            <button class="segmented-btn active" id="incomeFilterAll" onclick="setIncomeTxnFilter('all')">All</button>
-                            <button class="segmented-btn" id="incomeFilterPaycheck" onclick="setIncomeTxnFilter('paycheck')">Paychecks</button>
-                            <button class="segmented-btn" id="incomeFilterOther" onclick="setIncomeTxnFilter('other_income')">Other</button>
-                        </div>
-                        <div class="table-count-badge" id="incomeTxnCount">0 transactions</div>
-                    </div>
-                </div>
-                <div class="table-responsive-container">
-                    <table class="txn-table" id="incomeTxnTable">
-                        <thead>
-                            <tr>
-                                <th onclick="sortIncomeTxns('date')">Date <span id="isortinc_date" class="sort-indicator">&#9660;</span></th>
-                                <th onclick="sortIncomeTxns('name')">Description <span id="isortinc_name" class="sort-indicator"></span></th>
-                                <th onclick="sortIncomeTxns('person')">Person <span id="isortinc_person" class="sort-indicator"></span></th>
-                                <th onclick="sortIncomeTxns('type')">Type <span id="isortinc_type" class="sort-indicator"></span></th>
-                                <th onclick="sortIncomeTxns('amount')" style="text-align:right;">Amount <span id="isortinc_amount" class="sort-indicator"></span></th>
-                            </tr>
-                        </thead>
-                        <tbody id="incomeTxnBody"></tbody>
-                    </table>
-                </div>
-                <div class="table-scroll-sentinel" id="incomeTxnMore"></div>
-            </section>
-        </div>
-
         <!-- ===================== ANALYTICS TAB ===================== -->
         <div class="tab-panel" id="tab-analytics" hidden>
 
@@ -616,6 +486,17 @@
         </section>
         </div>
 
+        <!-- Which charts to show. The filter bar above and the transaction log below are the same for both. -->
+        <div class="view-toggle-bar">
+            <div class="segmented-toggle" role="tablist" aria-label="Charts to show">
+                <button type="button" class="segmented-btn active" id="viewBtn-spending" role="tab" onclick="setAnalyticsView('spending')">Spending</button>
+                <button type="button" class="segmented-btn" id="viewBtn-income" role="tab" onclick="setAnalyticsView('income')">Income</button>
+            </div>
+        </div>
+
+        <!-- ===== Spending view ===== -->
+        <div id="viewSpending">
+
         <!-- KPI Summary Metric Tiles -->
         <section class="kpi-grid">
             <!-- Total Income Card -->
@@ -730,12 +611,109 @@
             </div>
         </section>
 
+        </div>
+
+        <!-- ===== Income view: income numbers and charts, and who gets paid and from where ===== -->
+        <div id="viewIncome" hidden>
+
+        <section class="kpi-grid kpi-grid-wide" id="incomeKpis"></section>
+
+                    <section class="charts-grid">
+                        <div class="chart-card chart-card-full">
+                            <div class="chart-header">
+                                <div class="chart-title-area">
+                                    <div class="chart-title">Monthly income by person</div>
+                                    <div class="chart-subtitle" id="incomeMonthlySubtitle">Regular pay by person, bonuses, and other income</div>
+                                </div>
+                            </div>
+                            <div class="chart-canvas-container tall"><canvas id="chartIncomeMonthly"></canvas></div>
+                        </div>
+                        <div class="chart-card">
+                            <div class="chart-header">
+                                <div class="chart-title-area">
+                                    <div class="chart-title">Paycheck trend</div>
+                                    <div class="chart-subtitle">Each pay source over time &bull; &#9670; = bonus</div>
+                                </div>
+                            </div>
+                            <div class="chart-canvas-container"><canvas id="chartIncomeTrend"></canvas></div>
+                        </div>
+                        <div class="chart-card">
+                            <div class="chart-header">
+                                <div class="chart-title-area">
+                                    <div class="chart-title">Income vs. spending</div>
+                                    <div class="chart-subtitle">By month &bull; spending below zero &bull; line = net (income minus spending)</div>
+                                </div>
+                            </div>
+                            <div class="chart-canvas-container"><canvas id="chartIncomeVsSpend"></canvas></div>
+                        </div>
+                    </section>
+
+                    <section class="table-card" id="payDiscoverCard" hidden>
+                        <div class="table-header">
+                            <div>
+                                <div class="table-title">Deposits we noticed</div>
+                                <div class="table-subtitle">Money that arrives on a steady schedule and isn't tied to a pay source yet. Make the paychecks into pay sources; dismiss the rest.</div>
+                            </div>
+                        </div>
+                        <div class="table-responsive-container">
+                            <table class="txn-table income-table">
+                                <thead><tr><th>From</th><th>Repeats</th><th style="text-align:right;">Usual amount</th><th>Deposits</th><th>Next expected</th><th></th></tr></thead>
+                                <tbody id="payDiscoverBody"></tbody>
+                            </table>
+                        </div>
+                    </section>
+
+                    <section class="table-card" id="paySourcesCard">
+                        <div class="table-header">
+                            <div>
+                                <div class="table-title">Pay sources</div>
+                                <div class="table-subtitle" id="planningLine"></div>
+                            </div>
+                            <div class="table-header-actions">
+                                <button class="btn-refresh" id="btnAddSource" onclick="openSourceModal(null)">+ Add pay source</button>
+                            </div>
+                        </div>
+                        <div class="table-responsive-container">
+                            <table class="txn-table income-table">
+                                <thead>
+                                    <tr>
+                                        <th>Person</th><th>Source</th><th>Schedule</th>
+                                        <th style="text-align:right;">Typical paycheck</th>
+                                        <th style="text-align:right;">Per month</th>
+                                        <th>Next pay</th><th></th>
+                                    </tr>
+                                </thead>
+                                <tbody id="sourcesBody"></tbody>
+                            </table>
+                        </div>
+                    </section>
+
+                    <section class="table-card">
+                        <div class="table-header">
+                            <div>
+                                <div class="table-title">People</div>
+                                <div class="table-subtitle">Who income is tracked for.</div>
+                            </div>
+                            <div class="table-header-actions">
+                                <button class="btn-refresh" onclick="openPersonModal(null)">+ Add person</button>
+                            </div>
+                        </div>
+                        <div class="table-responsive-container">
+                            <table class="txn-table income-table">
+                                <thead><tr><th>Name</th><th>Status</th><th></th></tr></thead>
+                                <tbody id="peopleBody"></tbody>
+                            </table>
+                        </div>
+                    </section>
+
+        </div>
+
         <!-- Interactive Transaction Table with Infinite Scrolling & Audit Action -->
         <section class="table-card">
             <div class="table-header">
                 <div>
                     <div class="table-title">Transaction Records</div>
-                    <div class="table-subtitle">Click on any transaction row to view details or edit fields</div>
+                    <div class="table-subtitle">Spending and income together. Click any row to view or edit it.</div>
                 </div>
                 <div class="table-header-actions">
                     <div class="table-count-badge" id="tableRecordCountDisplay">Showing 0 of 0 records</div>

@@ -53,7 +53,7 @@
 | — | **Welcome** (centered dialog) | — | — | — |
 | 1 | Bring in your bank history | Import | Drop box, then *Process & review* | any transactions, or the review list is showing |
 | 2 | Check the envelopes and save | Import | *Save to database* | any transactions |
-| 3 | Where your paychecks come from | Income | Deposits we noticed, or *+ Add pay source* | at least 1 active pay source |
+| 3 | Where your paychecks come from | Spending & Income (Income view) | Deposits we noticed, or *+ Add pay source* | at least 1 active pay source |
 | 4 | Your envelopes | Budget | *Manage envelopes* | always (shows the count of each type) |
 | 5 | Give each envelope a monthly amount | Budget | *Accept all high-confidence* | no active spending envelope at $0 |
 | 6 | Add your bills | Budget | Bills we noticed, or the envelope table | every active bill envelope has a bill |

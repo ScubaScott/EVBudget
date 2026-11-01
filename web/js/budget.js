@@ -63,7 +63,7 @@ function renderBudgetKpis() {
         <div class="kpi-value ${cls}">${value}</div><div class="kpi-subtitle">${sub}</div></div>`;
     const people = Object.entries(s.planning_by_person || {}).map(([k, v]) => `${escapeHtml(k)} ${money(v)}`).join(' &bull; ');
     document.getElementById('budgetKpis').innerHTML =
-        card('income', 'Income to plan around', money(s.planning_income) + '<span class="kpi-unit"> / month</span>', people || 'Add pay sources on the Income tab') +
+        card('income', 'Income to plan around', money(s.planning_income) + '<span class="kpi-unit"> / month</span>', people || 'Add pay sources in Spending & Income, under Income') +
         card('net', 'Budgeted', money(s.total_budgeted) + '<span class="kpi-unit"> / month</span>', 'Spending and bills (goals take what is left)') +
         card(s.surplus >= 0 ? 'income' : 'spend', s.surplus >= 0 ? 'Left over' : 'Over budget', money(Math.abs(s.surplus)) + '<span class="kpi-unit"> / month</span>',
             s.surplus >= 0 ? 'Income minus everything budgeted' : 'Budgets add up to more than income') +

@@ -194,10 +194,40 @@ function apiPost(path, body) {
 // ---------------------------------------------------------------------
 // Tabs
 // ---------------------------------------------------------------------
-const TABS = ['envelopes', 'analytics', 'income', 'budget', 'import'];
+const TABS = ['envelopes', 'analytics', 'budget', 'import'];
+// Spending and Income share one tab (filters, KPIs and the transaction log); a toggle picks which charts show.
+// "#income" and showTab('income') still work: they open that tab on the Income view.
+const ANALYTICS_VIEWS = ['spending', 'income'];
+const TAB_ALIASES = { income: ['analytics', 'income'], spending: ['analytics', 'spending'] };
+const VIEW_KEY = 'evbudget_analytics_view';
 let activeTab = 'envelopes';
+let analyticsView = 'spending';
+try { const saved = localStorage.getItem(VIEW_KEY); if (ANALYTICS_VIEWS.includes(saved)) analyticsView = saved; } catch (e) { /* storage blocked */ }
 
-function showTab(name) {
+// quiet: the caller is about to announce a tab change, so skip the separate view-change event
+function setAnalyticsView(view, quiet) {
+    if (!ANALYTICS_VIEWS.includes(view)) view = 'spending';
+    const changed = view !== analyticsView;
+    analyticsView = view;
+    try { localStorage.setItem(VIEW_KEY, view); } catch (e) { /* storage blocked */ }
+    ANALYTICS_VIEWS.forEach(v => {
+        const panel = document.getElementById('view' + v.charAt(0).toUpperCase() + v.slice(1));
+        const btn = document.getElementById('viewBtn-' + v);
+        if (panel) panel.hidden = (v !== view);
+        if (btn) { btn.classList.toggle('active', v === view); btn.setAttribute('aria-selected', String(v === view)); }
+    });
+    if (activeTab === 'analytics') syncTabHash();
+    if (!quiet && changed) document.dispatchEvent(new CustomEvent('analyticsviewchange', { detail: { view } }));
+}
+
+function syncTabHash() {
+    const want = '#' + (activeTab === 'analytics' && analyticsView === 'income' ? 'income' : activeTab);
+    if (location.hash !== want) history.replaceState(null, '', want);
+}
+
+function showTab(name, view) {
+    const alias = TAB_ALIASES[name];
+    if (alias) { name = alias[0]; view = view || alias[1]; }
     if (!TABS.includes(name)) name = 'envelopes';
     activeTab = name;
     TABS.forEach(t => {
@@ -206,19 +236,19 @@ function showTab(name) {
         if (panel) panel.hidden = (t !== name);
         if (btn) btn.classList.toggle('active', t === name);
     });
-    if (location.hash !== '#' + name) {
-        history.replaceState(null, '', '#' + name);
-    }
+    if (name === 'analytics') setAnalyticsView(view || analyticsView, true);
+    syncTabHash();
     document.dispatchEvent(new CustomEvent('tabchange', { detail: { tab: name } }));
 }
 
 function setupTabs() {
     window.addEventListener('hashchange', () => {
         const name = location.hash.replace('#', '');
-        if (TABS.includes(name) && name !== activeTab) showTab(name);
+        const wanted = TAB_ALIASES[name] ? TAB_ALIASES[name] : [name, null];
+        if (TABS.includes(wanted[0]) && (wanted[0] !== activeTab || (wanted[1] && wanted[1] !== analyticsView))) showTab(name);
     });
     const initial = location.hash.replace('#', '');
-    showTab(TABS.includes(initial) ? initial : 'envelopes');
+    showTab(TABS.includes(initial) || TAB_ALIASES[initial] ? initial : 'envelopes');
 }
 
 // ---------------------------------------------------------------------
