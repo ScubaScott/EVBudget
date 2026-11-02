@@ -1,5 +1,40 @@
 [
   {
+    "version": "3.7",
+    "date": "2026-11-02",
+    "title": "Bills match their payments more reliably, and price changes get noticed",
+    "notes": [
+      {
+        "type": "fixed",
+        "text": "Bills no longer show up again under \"Bills we noticed\" or \"Start from a payee\" when you already added them, even if a rule renamed the payments afterwards."
+      },
+      {
+        "type": "improved",
+        "text": "Bank text on a bill now ignores capital letters, punctuation and anything after it, so \"Dicks Sanitation\" matches \"WCI*Dicks Sanitation payment1234\"."
+      },
+      {
+        "type": "improved",
+        "text": "A payment whose bank text names the bill now links to it even when the amount changed (a price rise, say). The amount is only used to tell apart two bills with the same text."
+      },
+      {
+        "type": "new",
+        "text": "When you add or edit a bill, the form lists the saved payments that fit its bank text. Tick the ones to link and the bill's last-paid and next-due dates update. Linked payments have an Unlink button."
+      },
+      {
+        "type": "improved",
+        "text": "Adding a suggested bill now fills in short bank text (no order codes, dates or reference numbers), so next month's payment still matches."
+      },
+      {
+        "type": "new",
+        "text": "On the Budget page, a new list shows bills whose bank text has a number in it that will not repeat. It suggests shorter text, and nothing changes until you press Use."
+      },
+      {
+        "type": "new",
+        "text": "On the Budget page, a new list shows bills set to \"the same every time\" whose latest payment was a different amount (a price rise, say). It shows what your envelope budget would become. Update the bill to what you paid, or keep it as is."
+      }
+    ]
+  },
+  {
     "version": "3.6",
     "date": "2026-11-02",
     "title": "Accounts, PDF statements from more banks, and duplicate spotting",

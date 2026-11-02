@@ -1680,6 +1680,51 @@ class App:
             return {"success": True}
         return self._ledger_run(work)
 
+    def bill_matches(self, req: Request) -> Any:
+        phrase = req.query.get("phrase", "")
+        env_id = int(req.query["envelope_id"]) if req.query.get("envelope_id") else None
+        return self._run(lambda c: {"payments": billmatch.matching_payments(c, phrase, env_id)})
+
+    def link_past_payments(self, req: Request) -> Any:
+        data = req.json()
+
+        def work(c):
+            try:
+                n = billmatch.link_past(c, int(data.get("bill_id") or 0), [str(t) for t in data.get("txn_ids") or []])
+            except ValueError as exc:
+                raise env_mod.ValidationError(str(exc))
+            return {"success": True, "linked": n}
+        return self._ledger_run(work)
+
+    def bill_price_changes(self, req: Request) -> Any:
+        return self._run(lambda c: {"changes": billmatch.price_changes(c)})
+
+    def resolve_bill_price(self, req: Request) -> Any:
+        data = req.json()
+
+        def work(c):
+            try:
+                billmatch.resolve_price_change(c, int(data.get("bill_id") or 0), str(data.get("action") or ""))
+            except ValueError as exc:
+                raise env_mod.ValidationError(str(exc))
+            return {"success": True}
+        return self._run(work)
+
+    def bill_phrase_review(self, req: Request) -> Any:
+        return self._run(lambda c: {"bills": billmatch.review_phrases(c)})
+
+    def set_bill_phrase(self, req: Request) -> Any:
+        data = req.json()
+
+        def work(c):
+            phrase = str(data.get("phrase") or "").strip()
+            if not billmatch.words(phrase):
+                raise env_mod.ValidationError("The match text can't be empty")
+            if c.execute("UPDATE bills SET match_phrase = ? WHERE id = ?", (phrase, int(data.get("bill_id") or 0))).rowcount == 0:
+                raise env_mod.ValidationError("Bill not found")
+            return {"success": True}
+        return self._run(work)
+
     def unlink_bill(self, req: Request) -> Any:
         txn_id = str(req.json().get("txn_id") or "")
 
@@ -1801,6 +1846,12 @@ class App:
         r.add("GET", "/api/bills/upcoming", self.upcoming_bills)
         r.add("POST", "/api/bills/link", self.link_bill)
         r.add("POST", "/api/bills/unlink", self.unlink_bill)
+        r.add("GET", "/api/bills/matches", self.bill_matches)
+        r.add("POST", "/api/bills/link-past", self.link_past_payments)
+        r.add("GET", "/api/bills/review", self.bill_phrase_review)
+        r.add("GET", "/api/bills/price-changes", self.bill_price_changes)
+        r.add("POST", "/api/bills/price-change", self.resolve_bill_price)
+        r.add("POST", "/api/bills/set-phrase", self.set_bill_phrase)
         r.add("GET", "/api/allocations/queue", self.allocation_queue)
         r.add("GET", "/api/allocations/draft", self.allocation_draft)
         r.add("POST", "/api/allocations/suggest", self.allocation_suggest)

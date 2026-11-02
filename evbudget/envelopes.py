@@ -4,7 +4,7 @@ import statistics
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from . import recurrence, store
+from . import billmatch, recurrence, store
 
 KINDS = ("spending", "bill", "goal")
 AMOUNT_MODES = ("fixed", "estimated")
@@ -135,11 +135,16 @@ def bill_history(conn: Any, envelope_id: int, today: Optional[date] = None) -> L
         return []
     groups: Dict[str, List[Any]] = {}
     for r in conn.execute(
-        """SELECT date, name, amount FROM transactions WHERE is_included = 1 AND txn_kind = 'expense'
+        """SELECT date, name, raw_name, amount, bill_id FROM transactions WHERE is_included = 1 AND txn_kind = 'expense'
            AND LOWER(TRIM(envelope)) = LOWER(?) ORDER BY date""", (env["name"],)):
         groups.setdefault((r["name"] or "").strip(), []).append(r)
+    bills = conn.execute("SELECT id, name, match_phrase FROM bills WHERE envelope_id = ?", (envelope_id,)).fetchall()
     out = []
     for name, rows in groups.items():
+        texts = {name} | {r["raw_name"] for r in rows}
+        linked = {r["bill_id"] for r in rows if r["bill_id"]}
+        if any(billmatch.bill_covers(b, texts, linked) for b in bills):
+            continue
         dates = [date.fromisoformat(r["date"]) for r in rows]
         gaps = [(b - a).days for a, b in zip(dates, dates[1:]) if (b - a).days > 0]
         median_gap = statistics.median(gaps) if gaps else None
@@ -161,7 +166,7 @@ def bill_history(conn: Any, envelope_id: int, today: Optional[date] = None) -> L
             "name": name, "payments": len(rows), "last_date": rows[-1]["date"],
             "last_amount": round(abs(float(rows[-1]["amount"])), 2),
             "typical_amount": round(statistics.median(abs(float(r["amount"])) for r in rows), 2),
-            "freq": freq, "interval": interval,
+            "freq": freq, "interval": interval, "match_phrase": billmatch.suggest_phrase([name]),
         })
     out.sort(key=lambda g: (-g["payments"], g["name"]))
     return out[:12]
@@ -209,22 +214,22 @@ def discover_bills(conn: Any, today: Optional[date] = None) -> List[Dict[str, An
     from .textutil import clean_vendor_for_lookup
 
     today = today or date.today()
-    existing = set()
-    for b in conn.execute("SELECT name, match_phrase FROM bills"):
-        existing.add(_norm(b["name"]))
-        if b["match_phrase"]:
-            existing.add(_norm(b["match_phrase"]))
+    bills = conn.execute("SELECT id, name, match_phrase FROM bills").fetchall()
     dismissed = set(dismissed_candidates(conn))
     env_ids = {r["name"].strip().lower(): (r["id"], r["name"]) for r in conn.execute("SELECT id, name FROM envelopes WHERE kind != 'system' AND active = 1")}
 
     groups: Dict[str, Dict[str, Any]] = {}
     for r in conn.execute(
-        "SELECT date, name, amount, envelope FROM transactions WHERE is_included = 1 AND txn_kind = 'expense' AND amount < 0 ORDER BY date"
+        "SELECT date, name, raw_name, amount, envelope, bill_id FROM transactions WHERE is_included = 1 AND txn_kind = 'expense' AND amount < 0 ORDER BY date"
     ):
         key = _norm(clean_vendor_for_lookup(r["name"] or ""))
         if not key:
             continue
-        g = groups.setdefault(key, {"by_date": {}, "envs": {}, "display": r["name"]})
+        g = groups.setdefault(key, {"by_date": {}, "envs": {}, "display": r["name"], "texts": set(), "names": set(), "linked": set()})
+        g["texts"].update((r["name"] or "", r["raw_name"] or ""))
+        g["names"].add(r["name"] or "")
+        if r["bill_id"]:
+            g["linked"].add(r["bill_id"])
         amt = abs(float(r["amount"]))
         g["by_date"][r["date"]] = max(g["by_date"].get(r["date"], 0.0), amt)  # same-day repeats count once
         env = (r["envelope"] or "").strip().lower()
@@ -233,7 +238,10 @@ def discover_bills(conn: Any, today: Optional[date] = None) -> List[Dict[str, An
     out: List[Dict[str, Any]] = []
     for key, g in groups.items():
         dates = sorted(g["by_date"])
-        if len(dates) < 3 or key in dismissed or key in existing or any(e and e in key for e in existing):
+        if len(dates) < 3 or key in dismissed:
+            continue
+        # Already a bill if one is linked to these payments, its match text is in them, or it has the same first words
+        if any(billmatch.bill_covers(b, g["texts"], g["linked"]) for b in bills):
             continue
         parsed = [date.fromisoformat(d) for d in dates]
         gaps = [(b - a).days for a, b in zip(parsed, parsed[1:])]
@@ -255,6 +263,7 @@ def discover_bills(conn: Any, today: Optional[date] = None) -> List[Dict[str, An
         nxt = recurrence.next_occurrence(freq, interval, parsed[-1], today - timedelta(days=1))
         out.append({
             "key": key, "name": g["display"], "envelope_id": env_id, "envelope": env_display, "payments": len(dates),
+            "match_phrase": billmatch.suggest_phrase(sorted(g["names"])),
             "amount": round(typical, 2), "freq": freq, "interval": interval, "last_date": dates[-1],
             "next_due": nxt.isoformat() if nxt else None,
             "confidence": "high" if steady == 1 and close == 1 and len(dates) >= 4 else "medium",

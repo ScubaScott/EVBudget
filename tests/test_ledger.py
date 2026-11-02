@@ -477,9 +477,100 @@ class BillMatchTests(LedgerCase):
 
     def test_no_match_when_text_amount_or_date_is_off(self):
         self.assertIsNone(self.pay_bill("2026-10-13", name="OTHER PAYEE")[1])
-        self.assertIsNone(self.pay_bill("2026-10-13", amt=-200)[1])
         self.assertIsNone(self.pay_bill("2026-09-01")[1])  # 41 days from the due date
         self.assertEqual(self.bill()["next_due_date"], "2026-10-12")
+
+    def test_a_price_change_still_links_when_the_bank_text_names_the_bill(self):
+        self.assertEqual(self.pay_bill("2026-10-13", amt=-200)[1], self.bill_id)
+
+    def test_without_match_text_the_amount_decides(self):
+        bid = self.call(self.app.save_bill, {"envelope_id": self.eid("Bills: One Time"), "name": "Fee", "amount": 50, "freq": "once",
+                                             "anchor_date": "2026-10-20", "next_due_date": "2026-10-20"})["id"]
+        tid = self.add_txn(date="2026-10-20", amount=-90, envelope="Bills: One Time", name="FEE")
+        c = self.conn()
+        try:
+            self.assertIsNone(billmatch.match_transaction(c, tid))
+        finally:
+            c.close()
+
+    def test_punctuation_ids_and_spacing_in_the_bank_text_do_not_matter(self):
+        c = self.conn()
+        c.execute("UPDATE bills SET match_phrase = 'Quantum  Fiber' WHERE id = ?", (self.bill_id,))
+        c.commit()
+        c.close()
+        self.assertEqual(self.pay_bill("2026-10-13", name="WCI*QUANTUM-FIBER payment1234")[1], self.bill_id)
+
+    def test_two_bills_in_one_envelope_are_told_apart_by_amount(self):
+        other = self.call(self.app.save_bill, {
+            "envelope_id": self.eid("Bills: Every Month"), "name": "Internet 2", "match_phrase": "QUANTUM FIBER", "amount": 30,
+            "freq": "monthly", "interval": 1, "anchor_date": "2026-10-12", "next_due_date": "2026-10-12"})["id"]
+        self.assertEqual(self.pay_bill("2026-10-13", amt=-30)[1], other)
+        self.assertEqual(self.pay_bill("2026-10-13", amt=-80)[1], self.bill_id)
+
+    def test_link_past_payments_moves_the_due_date_past_what_they_cover(self):
+        ids = [self.add_txn(date=d, amount=-80, envelope="Bills: Every Month", name="QUANTUM FIBER") for d in ("2026-08-12", "2026-09-12", "2026-10-12")]
+        c = self.conn()
+        try:
+            self.assertEqual(billmatch.link_past(c, self.bill_id, ids), 3)
+            c.commit()
+        finally:
+            c.close()
+        b = self.bill()
+        self.assertEqual((b["last_paid_date"], b["next_due_date"]), ("2026-10-12", "2026-11-12"))
+        c = self.conn()
+        try:
+            self.assertEqual(billmatch.link_past(c, self.bill_id, ids), 0)   # already linked: nothing to do
+        finally:
+            c.close()
+
+    def changes(self):
+        c = self.conn()
+        try:
+            return billmatch.price_changes(c)
+        finally:
+            c.close()
+
+    def test_a_fixed_bill_paid_at_a_new_amount_is_flagged_with_its_effect_on_the_budget(self):
+        self.pay_bill("2026-10-13", amt=-100)     # bill says 80: +25%
+        [ch] = self.changes()
+        self.assertEqual((ch["bill_id"], ch["old_amount"], ch["new_amount"], ch["percent"]), (self.bill_id, 80.0, 100.0, 25.0))
+        self.assertEqual(ch["monthly_change"], 20.0)
+
+    def test_a_small_difference_or_an_estimated_bill_is_not_flagged(self):
+        self.pay_bill("2026-10-13", amt=-84)      # 5%, inside the 10% allowed
+        self.assertEqual(self.changes(), [])
+        c = self.conn()
+        c.execute("UPDATE bills SET amount_mode = 'estimated', amount_cents = 8000 WHERE id = ?", (self.bill_id,))
+        c.execute("UPDATE transactions SET amount = -150")
+        c.commit()
+        c.close()
+        self.assertEqual(self.changes(), [])
+
+    def test_keep_silences_that_payment_and_update_changes_the_bill(self):
+        self.pay_bill("2026-10-13", amt=-100)
+        c = self.conn()
+        billmatch.resolve_price_change(c, self.bill_id, "keep")
+        c.commit()
+        c.close()
+        self.assertEqual(self.changes(), [])
+        self.pay_bill("2026-11-12", amt=-110)     # a newer payment asks again
+        self.assertEqual(len(self.changes()), 1)
+        c = self.conn()
+        billmatch.resolve_price_change(c, self.bill_id, "update")
+        c.commit()
+        c.close()
+        self.assertEqual(self.bill()["amount_cents"], 11000)
+        self.assertEqual(self.changes(), [])
+
+    def test_matching_payments_lists_what_a_phrase_would_catch(self):
+        self.add_txn(date="2026-08-12", amount=-80, envelope="Bills: Every Month", name="WCI*QUANTUM FIBER 77")
+        self.add_txn(date="2026-08-13", amount=-5, envelope="Bills: Every Month", name="SOMETHING ELSE")
+        c = self.conn()
+        try:
+            got = billmatch.matching_payments(c, "quantum fiber", self.eid("Bills: Every Month"))
+        finally:
+            c.close()
+        self.assertEqual([g["date"] for g in got], ["2026-08-12"])
 
     def test_unlink_puts_the_due_date_back(self):
         tid, _ = self.pay_bill("2026-10-13")

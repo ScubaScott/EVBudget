@@ -41,6 +41,8 @@ async function loadBudget() {
         renderBudgetTable();
         renderTemplates();
         loadDiscovery();
+        loadPhraseReview();
+        loadPriceChanges();
     } catch (err) {
         showToast('Could not load the budget: ' + err.message, true);
     }
@@ -245,11 +247,6 @@ async function loadBillHistory() {
     box.innerHTML = '';
     try {
         const data = await api('/api/bills/history?envelope_id=' + billsEnvelopeId);
-        // Leave out payees that already have a bill in this envelope
-        const bills = currentEnvelope().bills;
-        const norm = (t) => (t || '').toUpperCase().replace(/\s+/g, ' ').trim();
-        data.payees = data.payees.filter(p => !bills.some(b =>
-            norm(b.name) === norm(p.name) || (norm(b.match_phrase) && norm(p.name).includes(norm(b.match_phrase)))));
         window._billHistory = data.payees;
         if (!data.payees.length) return;
         box.innerHTML = '<span class="control-label">Start from a payee:</span> ' + data.payees.map((p, i) =>
@@ -261,12 +258,13 @@ function fillBillFromHistory(i) {
     const p = window._billHistory[i];
     resetBillForm();
     document.getElementById('billName').value = p.name;
-    document.getElementById('billPhrase').value = p.name;
+    document.getElementById('billPhrase').value = p.match_phrase || p.name;
     document.getElementById('billAmount').value = p.typical_amount;
     document.getElementById('billFreq').value = p.freq;
     document.getElementById('billInterval').value = p.interval;
     document.getElementById('billAnchor').value = p.last_date;
     previewBillDates();
+    loadBillMatches();
 }
 
 function resetBillForm() {
@@ -277,6 +275,7 @@ function resetBillForm() {
     document.getElementById('billActive').checked = true;
     document.getElementById('billFormTitle').textContent = 'Add a bill';
     document.getElementById('billPreview').textContent = '';
+    document.getElementById('billMatches').innerHTML = '';
 }
 
 function editBill(id) {
@@ -294,6 +293,7 @@ function editBill(id) {
     document.getElementById('billActive').checked = !!b.active;
     document.getElementById('billFormTitle').textContent = 'Edit bill';
     previewBillDates();
+    loadBillMatches();
     document.getElementById('billForm').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
@@ -310,7 +310,7 @@ async function previewBillDates() {
 
 async function saveBill() {
     try {
-        await apiPost('/api/bills/save', {
+        const saved = await apiPost('/api/bills/save', {
             id: document.getElementById('billId').value || null, envelope_id: billsEnvelopeId,
             name: document.getElementById('billName').value, match_phrase: document.getElementById('billPhrase').value,
             amount: document.getElementById('billAmount').value || 0, amount_mode: document.getElementById('billAmountMode').value,
@@ -322,9 +322,78 @@ async function saveBill() {
         const b = await api('/api/budget/envelopes');
         budgetData = b;
         renderBillsList();
-        resetBillForm();
         loadBillHistory();
-        showToast('Bill saved.');
+        editBill(saved.id);
+        const waiting = await loadBillMatches();
+        if (waiting === 0) resetBillForm();
+        showToast(waiting ? `Bill saved. ${waiting} past payment${waiting === 1 ? '' : 's'} fit it: tick the ones to link.` : 'Bill saved.');
+    } catch (err) { showToast(err.message, true); }
+}
+
+// ---------------------------------------------------------------------
+// Payments that fit a bill's bank text (live preview, link past payments, unlink)
+// ---------------------------------------------------------------------
+let billMatchTimer = null;
+let billMatchList = [];
+
+function billPhraseChanged() {
+    clearTimeout(billMatchTimer);
+    billMatchTimer = setTimeout(loadBillMatches, 300);
+}
+
+// Shows the payments the bank text catches. Returns how many of them are not linked to any bill yet.
+async function loadBillMatches() {
+    const box = document.getElementById('billMatches');
+    const phrase = document.getElementById('billPhrase').value.trim();
+    if (!phrase || !billsEnvelopeId) { box.innerHTML = ''; return 0; }
+    let data;
+    try {
+        data = await api('/api/bills/matches?envelope_id=' + billsEnvelopeId + '&phrase=' + encodeURIComponent(phrase));
+    } catch (err) { box.innerHTML = `<div class="import-hint">Could not look for matching payments: ${escapeHtml(err.message)}</div>`; return 0; }
+    if (document.getElementById('billPhrase').value.trim() !== phrase) return 0;   // typed on while loading
+    billMatchList = data.payments;
+    const id = parseInt(document.getElementById('billId').value || '0', 10);
+    if (!billMatchList.length) {
+        box.innerHTML = '<div class="import-hint">No saved payments contain this text yet. It will match when one arrives.</div>';
+        return 0;
+    }
+    const open = billMatchList.filter(p => !p.bill_id);
+    const rows = billMatchList.map((p, i) => {
+        const mine = id && p.bill_id === id;
+        const status = p.bill_id ? (mine ? 'Linked to this bill' : 'Linked to another bill') : (p.other_envelope ? 'In ' + escapeHtml(p.envelope || 'no envelope') : '');
+        const action = !p.bill_id ? (id ? `<input type="checkbox" class="txn-checkbox bill-match-pick" data-i="${i}" checked>` : '')
+            : (mine ? `<button type="button" class="btn-inline-action btn-inline-cancel" onclick="unlinkBillPayment('${escapeHtml(p.txn_id)}')">Unlink</button>` : '');
+        return `<tr><td>${action}</td><td style="white-space:nowrap;">${formatDisplayDate(p.date)}</td><td>${escapeHtml(p.name)}</td><td style="text-align:right;">${money(p.amount)}</td><td>${status}</td></tr>`;
+    }).join('');
+    box.innerHTML = `<div class="bill-matches-head"><strong>${billMatchList.length} saved payment${billMatchList.length === 1 ? '' : 's'}</strong> contain this text${open.length && id ? `, ${open.length} not linked to a bill yet` : ''}.
+        ${open.length && !id ? 'Save the bill, then you can link them.' : ''}
+        ${open.length && id ? '<button type="button" class="btn-inline-action btn-inline-cancel" onclick="linkTickedPayments()">Link ticked payments</button>' : ''}</div>
+        <div class="bill-matches-scroll"><table class="txn-table"><tbody>${rows}</tbody></table></div>
+        <div class="import-hint">Linking marks these as paid, so the bill's last-paid and next-due dates are right.</div>`;
+    return open.length;
+}
+
+async function linkTickedPayments() {
+    const id = parseInt(document.getElementById('billId').value || '0', 10);
+    const ids = Array.from(document.querySelectorAll('.bill-match-pick:checked')).map(b => billMatchList[parseInt(b.dataset.i, 10)].txn_id);
+    if (!id || !ids.length) { showToast('Tick at least one payment to link.', true); return; }
+    try {
+        const res = await apiPost('/api/bills/link-past', { bill_id: id, txn_ids: ids });
+        budgetData = await api('/api/budget/envelopes');
+        renderBillsList();
+        showToast(`Linked ${res.linked} payment${res.linked === 1 ? '' : 's'}.`);
+        editBill(id);
+        loadPriceChanges();
+    } catch (err) { showToast(err.message, true); }
+}
+
+async function unlinkBillPayment(txnId) {
+    const id = parseInt(document.getElementById('billId').value || '0', 10);
+    try {
+        await apiPost('/api/bills/unlink', { txn_id: txnId });
+        budgetData = await api('/api/budget/envelopes');
+        renderBillsList();
+        if (id) editBill(id);
     } catch (err) { showToast(err.message, true); }
 }
 
@@ -549,11 +618,68 @@ async function addDiscovered(i) {
     const c = discoverList[i];
     try {
         await apiPost('/api/bills/save', {
-            envelope_id: c.envelope_id, name: c.name, match_phrase: c.name, amount: c.amount, freq: c.freq,
+            envelope_id: c.envelope_id, name: c.name, match_phrase: c.match_phrase || c.name, amount: c.amount, freq: c.freq,
             interval: c.interval, anchor_date: c.last_date
         });
         showToast(`Added a bill for ${c.name}.`);
         await reloadBudgetKeepTemplates();
+        loadDiscovery();
+    } catch (err) { showToast(err.message, true); }
+}
+
+// Fixed-amount bills whose latest payment was a different amount
+let priceChangeList = [];
+
+async function loadPriceChanges() {
+    try { priceChangeList = (await api('/api/bills/price-changes')).changes; } catch (err) { priceChangeList = []; }
+    document.getElementById('priceChangeCard').hidden = priceChangeList.length === 0;
+    const sign = (n) => (n > 0 ? '+' : n < 0 ? '-' : '') + money(Math.abs(n));
+    document.getElementById('priceChangeBody').innerHTML = priceChangeList.map((c, i) => {
+        const effect = c.budget_follows_bills
+            ? `${escapeHtml(c.envelope)} budget goes from ${money(c.budget_now)} to ${money(c.budget_now + c.monthly_change)} a month (${sign(c.monthly_change)}).`
+            : `${sign(c.monthly_change)} a month. ${escapeHtml(c.envelope)} has a budget you set by hand (${money(c.budget_now)}), so check that it still covers this.`;
+        return `<tr>
+        <td><div style="font-weight:500;">${escapeHtml(c.name)}</div><div class="import-file-sub">${escapeHtml(c.envelope)}</div></td>
+        <td style="text-align:right;">${money(c.old_amount)}</td>
+        <td style="text-align:right;">${money(c.new_amount)}<div class="import-file-sub">${c.percent > 0 ? '+' : ''}${c.percent}% on ${formatDisplayDate(c.paid_date)}</div></td>
+        <td>${effect}</td>
+        <td style="text-align:right; white-space:nowrap;">
+            <button type="button" class="btn-modal-save" onclick="resolvePriceChange(${i}, 'update')">Update bill to ${money(c.new_amount)}</button>
+            <button type="button" class="btn-inline-action btn-inline-cancel" onclick="resolvePriceChange(${i}, 'keep')" title="Leave the bill at ${money(c.old_amount)}. You will be asked again only if a later payment is different.">Keep ${money(c.old_amount)}</button></td></tr>`;
+    }).join('');
+}
+
+async function resolvePriceChange(i, action) {
+    const c = priceChangeList[i];
+    try {
+        await apiPost('/api/bills/price-change', { bill_id: c.bill_id, action });
+        showToast(action === 'update' ? `${c.name} is now ${money(c.new_amount)}.` : `Kept ${c.name} at ${money(c.old_amount)}.`);
+        await reloadBudgetKeepTemplates();
+        loadPriceChanges();
+    } catch (err) { showToast(err.message, true); }
+}
+
+// Bills whose match text holds a number that will not repeat
+let phraseReviewList = [];
+
+async function loadPhraseReview() {
+    try { phraseReviewList = (await api('/api/bills/review')).bills; } catch (err) { phraseReviewList = []; }
+    document.getElementById('phraseReviewCard').hidden = phraseReviewList.length === 0;
+    document.getElementById('phraseReviewBody').innerHTML = phraseReviewList.map((b, i) => `<tr>
+        <td><div style="font-weight:500;">${escapeHtml(b.name)}</div></td>
+        <td><code>${escapeHtml(b.phrase)}</code><div class="import-file-sub">${b.now_matches} saved payment${b.now_matches === 1 ? '' : 's'}</div></td>
+        <td><input type="text" class="input-text" id="phraseReview${i}" value="${escapeHtml(b.suggested)}"></td>
+        <td>${b.would_match} payment${b.would_match === 1 ? '' : 's'}</td>
+        <td style="text-align:right; white-space:nowrap;"><button type="button" class="btn-modal-save" onclick="applyPhraseReview(${i})">Use</button></td></tr>`).join('');
+}
+
+async function applyPhraseReview(i) {
+    const b = phraseReviewList[i];
+    try {
+        await apiPost('/api/bills/set-phrase', { bill_id: b.bill_id, phrase: document.getElementById('phraseReview' + i).value });
+        showToast(`Updated the bank text for ${b.name}. Open its bills to link past payments.`);
+        await reloadBudgetKeepTemplates();
+        loadPhraseReview();
         loadDiscovery();
     } catch (err) { showToast(err.message, true); }
 }

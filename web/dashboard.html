@@ -554,6 +554,21 @@
                 </div>
             </section>
 
+            <section class="table-card" id="priceChangeCard" hidden>
+                <div class="table-header">
+                    <div>
+                        <div class="table-title">Bills that cost more or less than planned</div>
+                        <div class="table-subtitle">These bills are set to "the same every time", but the latest payment was a different amount. Update the bill to what you paid, or keep it as is if it was a one-off.</div>
+                    </div>
+                </div>
+                <div class="table-responsive-container">
+                    <table class="txn-table income-table">
+                        <thead><tr><th>Bill</th><th style="text-align:right;">Planned</th><th style="text-align:right;">Paid</th><th>Effect on your budget</th><th></th></tr></thead>
+                        <tbody id="priceChangeBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
             <section class="table-card" id="discoverCard" hidden>
                 <div class="table-header">
                     <div>
@@ -565,6 +580,21 @@
                     <table class="txn-table income-table">
                         <thead><tr><th>Payee</th><th>Envelope</th><th>Repeats</th><th style="text-align:right;">Usual amount</th><th>Next due</th><th></th></tr></thead>
                         <tbody id="discoverBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="table-card" id="phraseReviewCard" hidden>
+                <div class="table-header">
+                    <div>
+                        <div class="table-title">Bills whose bank text is too specific</div>
+                        <div class="table-subtitle">These bills match on text that has a number in it (an order code, a date, a reference), so next month's payment will not find them. Shorter text is suggested. Nothing changes until you press Use.</div>
+                    </div>
+                </div>
+                <div class="table-responsive-container">
+                    <table class="txn-table income-table">
+                        <thead><tr><th>Bill</th><th>Matches now</th><th>Suggested text</th><th>Would match</th><th></th></tr></thead>
+                        <tbody id="phraseReviewBody"></tbody>
                     </table>
                 </div>
             </section>
@@ -1723,7 +1753,8 @@
                         </div>
                         <div class="field-group">
                             <label for="billPhrase">Bank text to match (optional)</label>
-                            <input type="text" id="billPhrase" class="input-text" placeholder="e.g. QUANTUM FIBER">
+                            <input type="text" id="billPhrase" class="input-text" placeholder="e.g. QUANTUM FIBER" oninput="billPhraseChanged()">
+                            <div class="import-hint">Words from the payment's description. Capitals, punctuation and anything after these words (payment numbers, store codes) are ignored. Leave out numbers and dates that change each time.</div>
                         </div>
                         <div class="field-group">
                             <label for="billAmount">Amount ($)</label>
@@ -1762,6 +1793,7 @@
                         </div>
                         <div class="field-group full-col">
                             <div class="source-preview" id="billPreview"></div>
+                            <div class="bill-matches" id="billMatches"></div>
                             <div class="checkbox-row" style="margin-top: 6px;">
                                 <input type="checkbox" id="billActive" checked>
                                 <label for="billActive">Active</label>

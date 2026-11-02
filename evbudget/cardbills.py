@@ -21,7 +21,7 @@ from collections import Counter
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import recurrence
+from . import billmatch, recurrence
 from .envelopes import KNOWN_INTERVALS
 from .textutil import clean_vendor_for_lookup, vendor_key_tokens
 
@@ -120,8 +120,8 @@ def _find_bill(bills: List[Any], key_tokens: Tuple[str, ...], hay: str, linked_i
         if b["id"] in linked_ids:
             return {"id": b["id"], "name": b["name"]}
     for b in bills:
-        phrase = _norm(b["match_phrase"] or "")
-        if phrase and phrase in hay:
+        phrase = b["match_phrase"] or ""
+        if phrase and billmatch.phrase_in(phrase, hay):
             return {"id": b["id"], "name": b["name"]}
     for b in bills:
         bill_tokens = vendor_key_tokens(b["name"] or "")  # "Spotify" and "SPOTIFY USA" are the same merchant

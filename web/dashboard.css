@@ -4445,3 +4445,10 @@ details.rel-entry > summary .rel-name { margin-bottom: 4px; }
 .import-dup-note[hidden] { display: none; }
 
 .import-row-skipped .import-dup-hint { text-decoration: none; }
+
+
+/* Bills: payments that fit the bank text */
+.bill-matches { margin-top: 8px; font-size: 13px; }
+.bill-matches-head { margin-bottom: 6px; }
+.bill-matches-scroll { max-height: 190px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 8px; }
+.bill-matches-scroll td { padding: 5px 10px; }
