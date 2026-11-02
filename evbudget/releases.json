@@ -1,5 +1,36 @@
 [
   {
+    "version": "3.6",
+    "date": "2026-11-02",
+    "title": "Accounts, PDF statements from more banks, and duplicate spotting",
+    "notes": [
+      {
+        "type": "new",
+        "text": "Accounts: Import > Accounts lists every card and bank account your files come from. Add, rename, change the type, or merge one into another. You can filter by account on the Spending & Income page, and each transaction shows its account and the file it was imported from."
+      },
+      {
+        "type": "improved",
+        "text": "The Start and End dates now sit on the same line as the time presets, and the Clear button leaves the dates alone."
+      },
+      {
+        "type": "new",
+        "text": "PDF statements from more banks: EVBudget now reads any credit card statement that lists its transactions with dates and amounts, such as Chase, and checks them against the totals printed on the statement. If something doesn't add up, you'll see a warning before importing."
+      },
+      {
+        "type": "fixed",
+        "text": "Synchrony statements are now read by the same general-purpose reader as other banks, and no longer skip a statement credit. If you imported a statement with one (such as March), import it again and the missing credit will be added."
+      },
+      {
+        "type": "new",
+        "text": "Import now spots transactions you already saved under another account, such as after a card is reissued with a new number. Rows with the same date, amount and merchant start unticked with a note saying which saved transaction they match, so nothing is saved twice. Tick any that really are separate purchases."
+      },
+      {
+        "type": "improved",
+        "text": "The Save box in the import review's header ticks or unticks every row shown, following the filter and search."
+      }
+    ]
+  },
+  {
     "version": "3.5",
     "date": "2026-11-01",
     "title": "Setup walkthrough, themes, and feedback",

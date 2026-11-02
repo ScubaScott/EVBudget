@@ -24,7 +24,7 @@ VERSION_ID = re.compile(r"^[0-9A-Za-z.\-]{1,20}$")
 
 
 def current_version() -> str:
-    return f"{VERSION:.1f}"
+    return VERSION
 
 
 NOTE_TYPES = ("new", "improved", "fixed")

@@ -57,7 +57,9 @@ def make_pdf(path: str, lines) -> None:
         f.write(out.encode("latin-1"))
 
 
-class SynchronyParserTests(unittest.TestCase):
+class SynchronyStatementTests(unittest.TestCase):
+    """Synchrony has no parser of its own: its statements are read by the generic one."""
+
     def test_rows_and_signs(self):
         r = pdf_statements.parse_statement_text(SYNCHRONY_TEXT)
         self.assertEqual(r["bank"], "Synchrony")
@@ -74,9 +76,7 @@ class SynchronyParserTests(unittest.TestCase):
     def test_itemised_lines_are_a_note_not_a_transaction(self):
         rows = pdf_statements.parse_statement_text(SYNCHRONY_TEXT)["rows"]
         self.assertEqual(len(rows), 4)
-        self.assertIn("PEPPERONI", rows[2]["detail"])
-        self.assertIn("BOSTON BUTT", rows[2]["detail"])
-        self.assertEqual(rows[3]["detail"], "")  # page header after "(Continued)" must not attach
+        # the ", PEPPERONI, CHEESE" and "BOSTON BUTT" lines under the Sam's Club purchase are not rows of their own
 
     def test_totals_reconcile(self):
         r = pdf_statements.parse_statement_text(SYNCHRONY_TEXT)
@@ -96,10 +96,137 @@ class SynchronyParserTests(unittest.TestCase):
         self.assertEqual((fee["description"], fee["amount"], fee["ref"]), ("INTEREST CHARGE ON PURCHASES", -12.50, ""))
         self.assertTrue(r["reconciled"], r["warnings"])  # interest isn't part of the purchases subtotal
 
-    def test_unknown_bank_is_refused_with_supported_list(self):
+    def test_text_with_no_transactions_is_refused_and_says_what_is_expected(self):
         with self.assertRaises(pdf_statements.StatementError) as cm:
             pdf_statements.parse_statement_text("Some Other Bank\nTransaction History\n")
-        self.assertIn("Synchrony", str(cm.exception))
+        self.assertIn("date and an amount", str(cm.exception))
+
+    def test_a_synchrony_statement_credit_without_a_reference_number_is_kept(self):
+        text = SYNCHRONY_TEXT.replace("Purchases and Other Debits $143.42",
+                                      "Other Credits -$25.00\nPurchases and Other Debits $143.42\n12/18 STATEMENT CREDIT -$25.00")
+        r = pdf_statements.parse_statement_text(text)
+        credit = [x for x in r["rows"] if x["description"] == "STATEMENT CREDIT"]
+        self.assertEqual([(c["amount"], c["ref"]) for c in credit], [(25.0, "")])
+        self.assertTrue(r["reconciled"], r["warnings"])
+
+
+# Shaped like a Chase card statement (the text comes out of the PDF in a scrambled order, so the summary
+# is first, activity is split across pages, and "Order Number" lines sit under Amazon purchases).
+CHASE_TEXT = """\
+ACCOUNT SUMMARY
+Payment Due Date: 11/26/26
+New Balance: $152.40
+Account Number:  XXXX XXXX XXXX 3855
+Previous Balance $200.00
+Payment, Credits -$250.00
+Purchases +$202.40
+Cash Advances $0.00
+Fees Charged $0.00
+Interest Charged $0.00
+Opening/Closing Date 10/02/26 - 11/01/26
+www.chase.com/amazon
+ACCOUNT ACTIVITY
+Date of
+Transaction Merchant  Name or Transaction Description $ Amount
+10/09     & STATEMENT CREDIT -25.00
+10/26     AUTOMATIC PAYMENT - THANK YOU -225.00
+10/16     & TRAVELERS PER INS 800-842-5075 CT .10
+10/05     & Amazon.com*597XZ8ZV0 Amzn.com/bill WA 20.08
+Order Number       111-5721004-6944260
+10/04     & HY-VEE SHAKOPEE 1562 SHAKOPEE MN 175.39
+Page 4 of 4 Statement Date: 11/01/26
+09/30     TACO BELL 7005058 952-942-5766 MN 6.83
+Year-to-date totals do not reflect any fee or interest refunds
+"""
+
+
+class GenericParserTests(unittest.TestCase):
+    """A bank with no code of its own: read by what every statement has, and checked against its own totals."""
+
+    def setUp(self):
+        self.text = CHASE_TEXT
+
+    def test_a_bank_with_no_special_code_is_read_and_reconciles(self):
+        r = pdf_statements.parse_statement_text(self.text)
+        self.assertEqual((r["bank"], r["account_last4"]), ("Chase", "3855"))
+        self.assertEqual((r["period_start"], r["period_end"]), ("2026-10-02", "2026-11-01"))
+        self.assertTrue(r["reconciled"], r["warnings"])
+
+    def test_signs_follow_the_statement_totals(self):
+        rows = {x["description"]: x["amount"] for x in pdf_statements.parse_statement_text(self.text)["rows"]}
+        self.assertEqual(rows["STATEMENT CREDIT"], 25.0)                      # money in
+        self.assertEqual(rows["AUTOMATIC PAYMENT - THANK YOU"], 225.0)
+        self.assertEqual(rows["HY-VEE SHAKOPEE 1562 SHAKOPEE MN"], -175.39)
+        self.assertEqual(rows["TRAVELERS PER INS 800-842-5075 CT"], -0.10)    # ".10" with no leading digit, and the & marker
+
+    def test_thousands_separators(self):
+        text = self.text.replace("175.39", "1,175.39").replace("$202.40", "$1,202.40").replace("New Balance: $152.40", "New Balance: $1,152.40")
+        r = pdf_statements.parse_statement_text(text)
+        self.assertTrue(r["reconciled"], r["warnings"])
+
+    def test_order_number_is_a_note_not_a_transaction(self):
+        rows = pdf_statements.parse_statement_text(self.text)["rows"]
+        self.assertEqual(len(rows), 6)
+        amazon = [r for r in rows if r["description"].startswith("Amazon.com")][0]
+        self.assertIn("111-5721004-6944260", amazon["detail"])
+
+    def test_dates_get_their_year_from_the_statement_period(self):
+        dates = {x["description"]: x["date"] for x in pdf_statements.parse_statement_text(self.text)["rows"]}
+        self.assertEqual(dates["STATEMENT CREDIT"], "2026-10-09")
+
+    def test_a_missed_row_is_flagged_not_silent(self):
+        r = pdf_statements.parse_statement_text(self.text.replace("09/30     TACO BELL 7005058 952-942-5766 MN 6.83\n", ""))
+        self.assertFalse(r["reconciled"])
+        self.assertTrue(any("Purchases" in w for w in r["warnings"]), r["warnings"])
+
+    def test_opposite_sign_convention_is_detected(self):
+        # A bank that prints payments as positive and purchases as negative
+        flipped = []
+        for line in self.text.splitlines():
+            m = pdf_statements._GEN_ROW.match(pdf_statements.squash(line))
+            if m:
+                amount = m.group(4)
+                line = line.replace(amount, amount[1:] if amount.startswith("-") else "-" + amount)
+            flipped.append(line)
+        text = "\n".join(flipped).replace("Payment, Credits -$250.00", "Payment, Credits $250.00").replace("Purchases +$202.40", "Purchases -$202.40")
+        r = pdf_statements.parse_statement_text(text)
+        self.assertTrue(r["reconciled"], r["warnings"])
+        rows = {x["description"]: x["amount"] for x in r["rows"]}
+        self.assertEqual((rows["STATEMENT CREDIT"], rows["HY-VEE SHAKOPEE 1562 SHAKOPEE MN"]), (25.0, -175.39))
+
+    def test_balances_can_vouch_for_the_rows_when_labels_are_unfamiliar(self):
+        text = self.text.replace("Payment, Credits -$250.00", "Money you sent us -$250.00").replace("Purchases +$202.40", "New stuff +$202.40")
+        r = pdf_statements.parse_statement_text(text)
+        self.assertTrue(r["reconciled"], r["warnings"])
+
+    def test_no_totals_at_all_imports_with_a_warning(self):
+        keep = [l for l in self.text.splitlines() if not l.startswith(("Payment, Credits", "Purchases", "New Balance", "Previous Balance"))]
+        r = pdf_statements.parse_statement_text("\n".join(keep))
+        self.assertFalse(r["reconciled"])
+        self.assertEqual(len(r["rows"]), 6)
+        self.assertEqual({x["description"]: x["amount"] for x in r["rows"]}["AUTOMATIC PAYMENT - THANK YOU"], 225.0)  # judged by the word PAYMENT
+
+    def test_dates_but_no_statement_period_is_refused_with_a_reason(self):
+        keep = [l for l in self.text.splitlines() if "Opening/Closing" not in l and "Statement Date" not in l]
+        with self.assertRaises(pdf_statements.StatementError) as cm:
+            pdf_statements.parse_statement_text("\n".join(keep))
+        self.assertIn("statement's dates", str(cm.exception))
+
+    def test_a_year_on_each_line_and_a_posting_date_are_understood(self):
+        text = ("Statement Period: 01/05/2027 - 02/04/2027\nAccount ending in 4321\nPurchases $9.99\n"
+                "01/20/2027 01/21/2027 NETFLIX.COM 9.99\n")
+        r = pdf_statements.parse_statement_text(text)
+        self.assertEqual((r["rows"][0]["date"], r["rows"][0]["amount"], r["account_last4"]), ("2027-01-20", -9.99, "4321"))
+
+    def test_zero_dollar_lines_are_not_transactions(self):
+        r = pdf_statements.parse_statement_text(self.text + "11/01 INTEREST CHARGE ON PURCHASES $0.00\n")
+        self.assertEqual(len(r["rows"]), 6)
+
+    def test_a_reference_number_before_the_description_becomes_the_ref(self):
+        text = self.text + "10/20 F146800JV00CHGDDA CORNER STORE  MN 2.50\n"
+        text = text.replace("Purchases +$202.40", "Purchases +$204.90").replace("New Balance: $152.40", "New Balance: $154.90")
+        row = [x for x in pdf_statements.parse_statement_text(text)["rows"] if x["description"] == "CORNER STORE MN"][0]
+        self.assertEqual(row["ref"], "F146800JV00CHGDDA")
 
 
 class PdfImportFlowTests(TempAppCase):

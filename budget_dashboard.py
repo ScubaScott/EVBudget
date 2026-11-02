@@ -91,7 +91,7 @@ def main() -> None:
     url = f"http://127.0.0.1:{port}/"
 
     print("=" * 65)
-    print(f" EVBudget Dashboard (v{VERSION:.1f})")
+    print(f" EVBudget Dashboard (v{VERSION})")
     print("=" * 65)
     print(f" * Web Interface:  {url}")
     print(f" * Budgets:        {paths.PROFILES_DIR}")

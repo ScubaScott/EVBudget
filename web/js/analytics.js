@@ -44,6 +44,7 @@ let allTransactions = [];
 let goLiveDate = null;
 let filteredTransactions = [];
 let configuredEnvelopesList = [];
+let accountsList = [];            // account names, for the filter and the edit dialog
 let activePreset = "last_30_days";
 let inclusionFilter = "included"; // 'included' | 'all' | 'excluded'
 let currentSortColumn = "date";
@@ -211,6 +212,7 @@ async function refreshTransactions() {
         allTransactions = data.transactions || [];
         goLiveDate = data.go_live_date || null;
         configuredEnvelopesList = data.envelopes || configuredEnvelopesList;
+        accountsList = data.accounts || accountsList;
         peopleList = data.people || peopleList;
         incomeSourcesList = data.income_sources || incomeSourcesList;
         populateEnvelopeDropdowns();
@@ -232,6 +234,7 @@ async function reloadTransactionData() {
         allTransactions = data.transactions || [];
         goLiveDate = data.go_live_date || null;
         configuredEnvelopesList = data.envelopes || [];
+        accountsList = data.accounts || [];
         peopleList = data.people || [];
         incomeSourcesList = data.income_sources || [];
         populateEnvelopeDropdowns();
@@ -266,6 +269,17 @@ function populateEnvelopeDropdowns() {
         filterSelect.appendChild(opt);
     });
     filterSelect.value = currentFilterVal;
+
+    // Account filter and the edit dialog's account picker
+    const names = new Set(accountsList);
+    allTransactions.forEach(t => { if (t.account_name) names.add(t.account_name); });
+    const accountOptions = Array.from(names).sort((a, b) => a.localeCompare(b))
+        .map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
+    const accountFilter = document.getElementById('filterAccount');
+    const currentAccount = accountFilter.value;
+    accountFilter.innerHTML = '<option value="">All Accounts</option><option value="__NONE__">No account yet</option>' + accountOptions;
+    accountFilter.value = currentAccount;
+    document.getElementById('editAccountName').innerHTML = '<option value="">(No account)</option>' + accountOptions;
 
     // Populate Modal Edit dropdown
     const editSelect = document.getElementById('editEnvelope');
@@ -308,6 +322,7 @@ function goToUncategorized() {
     showTab('analytics', 'spending');
     setInclusionFilter('included');
     document.getElementById('filterSearch').value = '';
+    document.getElementById('filterAccount').value = '';
     document.getElementById('filterPerson').value = '';
     document.getElementById('filterKind').value = '';
     applyPreset('all_time');
@@ -326,6 +341,7 @@ function goToNeedsReview() {
     setInclusionFilter('included');
     document.getElementById('filterSearch').value = '';
     document.getElementById('filterEnvelope').value = '';
+    document.getElementById('filterAccount').value = '';
     document.getElementById('filterPerson').value = '';
     document.getElementById('filterKind').value = '__NEEDS_REVIEW__';
     applyPreset('all_time');
@@ -468,6 +484,7 @@ function clearFilterCriteria() {
         envelopeSelect.value = '';
     }
     document.getElementById('filterKind').value = '';
+    document.getElementById('filterAccount').value = '';
     document.getElementById('filterPerson').value = '';
     closeRegexHelp();
     setInclusionFilter('included');
@@ -482,6 +499,7 @@ function onFilterChange() {
     const searchRaw = searchInput ? searchInput.value.trim() : '';
     const envelopeVal = document.getElementById('filterEnvelope').value;
     const kindVal = document.getElementById('filterKind').value;
+    const accountVal = document.getElementById('filterAccount').value;
     const personVal = document.getElementById('filterPerson').value;
     const startDateStr = document.getElementById('filterStartDate').value;
     const endDateStr = document.getElementById('filterEndDate').value;
@@ -538,6 +556,13 @@ function onFilterChange() {
         }
         if (personVal && String(txn.person_id || '') !== personVal) return false;
 
+        // Account check
+        if (accountVal === '__NONE__') {
+            if (txn.account_name) return false;
+        } else if (accountVal && txn.account_name !== accountVal) {
+            return false;
+        }
+
         // Envelope check
         if (envelopeVal === '__UNALLOCATED__') {
             if (txn.envelope && txn.envelope.trim().length > 0) return false;
@@ -554,6 +579,8 @@ function onFilterChange() {
                 txn.txn_id || '',
                 txn.check_num || '',
                 txn.account_type || '',
+                txn.account_name || '',
+                txn.source_file || '',
                 txn.exclusion_reason || '',
                 txn.income_label || '',
                 KIND_LABELS[txn.txn_kind] || ''
@@ -1301,7 +1328,10 @@ function appendNextTableChunk() {
                 ${txn.raw_name && txn.raw_name !== txn.name ? `<div style="font-size: 11px; color: var(--text-dim);">${escapeHtml(txn.raw_name)}</div>` : ''}
             </td>
             <td>${envelopeMarkup}</td>
-            <td style="color: var(--text-muted); font-size: 12.5px;">${escapeHtml(txn.account_type || '—')}</td>
+            <td class="account-cell" title="${escapeHtml(txn.account_type || '')}">
+                <div>${txn.account_name ? escapeHtml(txn.account_name) : '<span class="import-muted">&mdash;</span>'}</div>
+                ${txn.source_file ? `<div class="account-file" title="${escapeHtml(txn.source_file)}">${escapeHtml(txn.source_file.split(',')[0].trim())}</div>` : ''}
+            </td>
             <td class="amount-cell ${amountClass}">${formattedAmount}</td>
             <td>${statusMarkup}</td>
             <td style="font-family: monospace; font-size: 11.5px; color: var(--text-dim);">${escapeHtml(txn.txn_id)}</td>
@@ -1426,6 +1456,7 @@ function openEditModal(txnId) {
     document.getElementById('editName').value = txn.name || '';
     document.getElementById('editEnvelope').value = txn.envelope || '';
     document.getElementById('editAccountType').value = txn.account_type || 'Bank / Checking';
+    document.getElementById('editAccountName').value = txn.account_name || '';
     document.getElementById('editAmount').value = txn.amount !== undefined ? txn.amount : 0.0;
     document.getElementById('editCheckNum').value = txn.check_num || '';
     document.getElementById('editExclusionReason').value = txn.exclusion_reason || '';
@@ -1543,6 +1574,7 @@ async function saveTransactionEdits(event) {
         name: document.getElementById('editName').value.trim(),
         envelope: document.getElementById('editEnvelope').value.trim(),
         account_type: document.getElementById('editAccountType').value,
+        account_name: document.getElementById('editAccountName').value,
         date: formattedDate,
         amount: parseFloat(document.getElementById('editAmount').value) || 0.0,
         check_num: document.getElementById('editCheckNum').value.trim(),
@@ -1564,6 +1596,7 @@ async function saveTransactionEdits(event) {
                 allTransactions[idx].name = updatePayload.name;
                 allTransactions[idx].envelope = updatePayload.envelope;
                 allTransactions[idx].account_type = updatePayload.account_type;
+                allTransactions[idx].account_name = updatePayload.account_name;
                 allTransactions[idx].date = updatePayload.date;
                 allTransactions[idx].amount = updatePayload.amount;
                 allTransactions[idx].check_num = updatePayload.check_num;

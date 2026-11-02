@@ -258,7 +258,7 @@ class App:
         if not os.path.exists(path):
             return Response(f"<h1>{page_name} not found at {path}</h1>".encode(), "text/html; charset=utf-8", 500)
         with open(path, "r", encoding="utf-8") as f:
-            html_text = f.read().replace("{{VERSION}}", f"{VERSION:.1f}")
+            html_text = f.read().replace("{{VERSION}}", VERSION)
         return Response(html_text.encode("utf-8"), "text/html; charset=utf-8")
 
     def static(self, req: Request) -> Response:
@@ -312,7 +312,7 @@ class App:
         return {"success": True}
 
     def health(self, req: Request) -> Dict[str, Any]:
-        return {"status": "ok", "version": f"{VERSION:.1f}", "budget": self.profile_name, "boot": self.boot_id}
+        return {"status": "ok", "version": VERSION, "budget": self.profile_name, "boot": self.boot_id}
 
     # ----------------------------------------------------------- transactions
 
@@ -340,10 +340,13 @@ class App:
                 d["funded"] = cents is not None and cents >= round(d["amount"] * 100)
                 d["partially_funded"] = cents is not None and not d["funded"]
             return {
-                "version": f"{VERSION:.1f}",
+                "version": VERSION,
                 "go_live_date": store.get_setting(conn, "go_live_date") or None,
                 "count": len(txns),
                 "envelopes": _envelope_names(conn),
+                "accounts": [r[0] for r in conn.execute(
+                    """SELECT name FROM accounts UNION SELECT account_name FROM transactions
+                       WHERE account_name IS NOT NULL AND account_name != '' ORDER BY 1 COLLATE NOCASE""")],
                 "people": [dict(r) for r in conn.execute("SELECT id, name FROM people WHERE active = 1 ORDER BY id")],
                 "income_sources": [
                     dict(r) for r in conn.execute("SELECT id, name, person_id FROM income_sources WHERE active = 1 ORDER BY id")
@@ -419,9 +422,12 @@ class App:
             label = str(data.get("income_label", row["income_label"] or "")).strip() or None
             needs_review = int(data.get("needs_review", row["needs_review"]) or 0)
 
+            account_name = row["account_name"] or ""
+            if "account_name" in data:
+                account_name = cards.assign_account(conn, data.get("account_name"), str(data.get("account_type") or cards.DEFAULT_TYPE))
             now = datetime.now().isoformat()
             conn.execute(
-                """UPDATE transactions SET date=?, name=?, amount=?, envelope=?, check_num=?, account_type=?,
+                """UPDATE transactions SET date=?, name=?, amount=?, envelope=?, check_num=?, account_type=?, account_name=?,
                           is_included=?, exclusion_reason=?, txn_kind=?, person_id=?, income_subtype=?,
                           income_source_id=?, income_label=?, reimburses_txn_id=?, needs_review=?,
                           user_modified=1, updated_at=? WHERE txn_id=?""",
@@ -429,6 +435,7 @@ class App:
                     date, str(data.get("name", row["name"])).strip(), amount, envelope,
                     str(data.get("check_num", row["check_num"] or "")).strip(),
                     str(data.get("account_type", row["account_type"] or "")).strip(),
+                    account_name,
                     included, reason, kind, person_id, subtype, income_source_id, label, reimburses,
                     needs_review, now, txn_id,
                 ),
@@ -1554,6 +1561,38 @@ class App:
         return Response(("\ufeff" + out["text"]).encode("utf-8"), "text/csv; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="{out["filename"]}"'})
 
+    def accounts_list(self, req: Request) -> Any:
+        return self._run(lambda c: {"accounts": cards.list_accounts(c), "types": list(cards.ACCOUNT_TYPES)})
+
+    def accounts_save(self, req: Request) -> Any:
+        self._need_json(req)
+        data = req.json()
+        raw_id = data.get("id")
+
+        def work(c):
+            try:
+                new_id = cards.save_account(c, int(raw_id) if raw_id else None, data.get("name"), data.get("account_type"))
+            except ValueError as exc:
+                raise env_mod.ValidationError(str(exc))
+            return {"success": True, "id": new_id}
+        out = self._run(work)
+        self.sync_csv()
+        return out
+
+    def accounts_delete(self, req: Request) -> Any:
+        self._need_json(req)
+        data = req.json()
+
+        def work(c):
+            try:
+                moved = cards.delete_account(c, int(data.get("id") or 0), int(data["merge_into"]) if data.get("merge_into") else None)
+            except ValueError as exc:
+                raise env_mod.ValidationError(str(exc))
+            return {"success": True, "moved": moved}
+        out = self._run(work)
+        self.sync_csv()
+        return out
+
     def get_cards(self, req: Request) -> Any:
         """Card names in use, and earlier imports that still have none."""
         return self._run(lambda c: {"cards": cards.list_cards(c), "unnamed": cards.unnamed_groups(c, self.input_dir)})
@@ -1751,6 +1790,9 @@ class App:
         r.add("GET", "/api/envelopes/ledger", self.envelope_ledger)
         r.add("GET", "/api/envelopes/ledger.csv", self.ledger_csv)
         r.add("GET", "/api/bills/discover", self.discover_bills)
+        r.add("GET", "/api/accounts", self.accounts_list)
+        r.add("POST", "/api/accounts/save", self.accounts_save)
+        r.add("POST", "/api/accounts/delete", self.accounts_delete)
         r.add("GET", "/api/cards", self.get_cards)
         r.add("POST", "/api/cards/name", self.name_cards)
         r.add("GET", "/api/cards/bills", self.card_bills)

@@ -107,6 +107,7 @@
             <div class="view-toggle-bar">
                 <div class="segmented-toggle" role="tablist" aria-label="Import sections">
                     <button type="button" class="segmented-btn active" id="importSubBtn-import" role="tab" onclick="showImportSub('import')">Import</button>
+                    <button type="button" class="segmented-btn" id="importSubBtn-accounts" role="tab" onclick="showImportSub('accounts')">Accounts</button>
                     <button type="button" class="segmented-btn" id="importSubBtn-rules" role="tab" onclick="showImportSub('rules')">Rules</button>
                     <button type="button" class="segmented-btn" id="importSubBtn-history" role="tab" onclick="showImportSub('history')">History</button>
                 </div>
@@ -182,13 +183,18 @@
                         </div>
                     </div>
 
+                    <div class="import-dup-note" id="importDupNote" hidden></div>
+
                     <div class="import-chips" id="importChips"></div>
 
                     <div class="table-responsive-container import-grid-wrap">
                         <table class="txn-table import-grid">
                             <thead>
                                 <tr>
-                                    <th style="width: 44px; text-align: center;" title="Untick to leave a new row out of this import">Save</th>
+                                    <th style="width: 52px; text-align: center;" title="Untick a new row to leave it out of this import">
+                                        <div class="import-save-head">Save</div>
+                                        <input type="checkbox" id="importSaveAll" class="txn-checkbox" onchange="importToggleSaveAll(this.checked)" title="Tick or untick every new row shown. It follows the filter and search above.">
+                                    </th>
                                     <th style="width: 44px; text-align: center;" title="Count this row in budget reports">Incl</th>
                                     <th onclick="importSortBy('date')" style="width: 110px;">Date <span id="isort_date" class="sort-indicator">&#9660;</span></th>
                                     <th onclick="importSortBy('name')">Payee <span id="isort_name" class="sort-indicator"></span></th>
@@ -210,6 +216,39 @@
                     </div>
                 </section>
             </section>
+            </div>
+
+            <!-- ===== Accounts ===== -->
+            <div id="importSubAccounts" hidden>
+                <div class="import-hint rules-intro">An account is where a transaction came from: a checking account, a credit card. Each import is tied to one, and you can filter any list by account. EVBudget doesn't track balances. Renaming an account renames it on every transaction.</div>
+                <section class="table-card">
+                    <div class="table-header">
+                        <div>
+                            <div class="table-title">Accounts</div>
+                            <div class="table-subtitle" id="acctSub"></div>
+                        </div>
+                        <div class="table-header-actions acct-add">
+                            <input type="text" id="acctNewName" class="input-text" placeholder="New account name, e.g. Chase 3653" maxlength="60" onkeydown="if (event.key === 'Enter') addAccount()">
+                            <select id="acctNewType" class="select-input"></select>
+                            <button type="button" class="btn-modal-save" onclick="addAccount()">Add account</button>
+                        </div>
+                    </div>
+                    <div class="table-responsive-container">
+                        <table class="txn-table">
+                            <thead>
+                                <tr>
+                                    <th>Account</th>
+                                    <th style="width: 150px;">Type</th>
+                                    <th style="width: 110px; text-align: right;">Transactions</th>
+                                    <th style="width: 190px;">Dates</th>
+                                    <th>Imported from</th>
+                                    <th style="width: 250px;">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="acctBody"></tbody>
+                        </table>
+                    </div>
+                </section>
             </div>
 
             <!-- ===== Rules ===== -->
@@ -552,7 +591,6 @@
         <section class="controls-card" id="sharedFilterBar">
             <!-- Preset Timeframe Buttons -->
             <div class="presets-row">
-                <span class="control-label">Preset:</span>
                 <button class="preset-btn" data-preset="this_week" onclick="applyPreset('this_week')">This Week</button>
                 <button class="preset-btn" data-preset="last_week" onclick="applyPreset('last_week')">Last Week</button>
                 <button class="preset-btn" data-preset="this_month" onclick="applyPreset('this_month')">This Month</button>
@@ -564,6 +602,12 @@
                 <button class="preset-btn" data-preset="ytd" onclick="applyPreset('ytd')">Year to Date</button>
                 <button class="preset-btn" data-preset="last_365_days" onclick="applyPreset('last_365_days')">Last 365 Days</button>
                 <button class="preset-btn" data-preset="all_time" onclick="applyPreset('all_time')">All Time</button>
+                <div class="preset-dates">
+                    <label for="filterStartDate">Start</label>
+                    <input type="date" id="filterStartDate" class="input-date" onchange="onCustomDateChange()">
+                    <label for="filterEndDate">End</label>
+                    <input type="date" id="filterEndDate" class="input-date" onchange="onCustomDateChange()">
+                </div>
             </div>
 
             <!-- Detailed Filters Grid -->
@@ -629,16 +673,12 @@
                     </select>
                 </div>
 
-                <!-- Start Date -->
+                <!-- Account Dropdown -->
                 <div class="field-group">
-                    <label for="filterStartDate">Start Date</label>
-                    <input type="date" id="filterStartDate" class="input-date" onchange="onCustomDateChange()">
-                </div>
-
-                <!-- End Date -->
-                <div class="field-group">
-                    <label for="filterEndDate">End Date</label>
-                    <input type="date" id="filterEndDate" class="input-date" onchange="onCustomDateChange()">
+                    <label for="filterAccount">Account</label>
+                    <select id="filterAccount" class="select-input" onchange="onFilterChange()">
+                        <option value="">All Accounts</option>
+                    </select>
                 </div>
 
                 <!-- Kind Filter -->
@@ -676,7 +716,7 @@
                 </div>
 
                 <!-- Clear Filters Button -->
-                <button class="btn-clear" id="btnClearFilters" onclick="clearFilterCriteria()" title="Clear search and category filters without changing timeframe">Clear</button>
+                <button class="btn-clear" id="btnClearFilters" onclick="clearFilterCriteria()" title="Clear the search and the envelope, account, kind and person filters. The dates stay as they are.">Clear</button>
             </div>
         </section>
         </div>
@@ -939,7 +979,7 @@
                             <th onclick="sortTable('date')">Date <span id="sort_date" class="sort-indicator">▼</span></th>
                             <th onclick="sortTable('name')">Payee / Description <span id="sort_name" class="sort-indicator"></span></th>
                             <th onclick="sortTable('envelope')">Envelope / Category <span id="sort_envelope" class="sort-indicator"></span></th>
-                            <th onclick="sortTable('account_type')">Account <span id="sort_account_type" class="sort-indicator"></span></th>
+                            <th onclick="sortTable('account_name')">Account / file <span id="sort_account_name" class="sort-indicator"></span></th>
                             <th onclick="sortTable('amount')" style="text-align: right;">Amount <span id="sort_amount" class="sort-indicator"></span></th>
                             <th onclick="sortTable('is_included')">Status <span id="sort_is_included" class="sort-indicator"></span></th>
                             <th onclick="sortTable('txn_id')">Txn ID <span id="sort_txn_id" class="sort-indicator"></span></th>
@@ -1015,6 +1055,14 @@
                             <label for="editEnvelope">Envelope / Category</label>
                             <select id="editEnvelope" class="select-input">
                                 <option value="">(No envelope: income &amp; transfers)</option>
+                            </select>
+                        </div>
+
+                        <!-- Account -->
+                        <div class="field-group">
+                            <label for="editAccountName">Account</label>
+                            <select id="editAccountName" class="select-input">
+                                <option value="">(No account)</option>
                             </select>
                         </div>
 
@@ -1960,6 +2008,33 @@
         </div>
     </div>
 
+    <!-- Merge or delete an account -->
+    <div class="modal-overlay" id="acctDeleteOverlay" onclick="if (event.target === this) closeAccountDelete()">
+        <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="acctDeleteTitle" style="max-width: 520px;">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title" id="acctDeleteTitle">Delete account</div>
+                    <div class="modal-subtitle" id="acctDeleteSub"></div>
+                </div>
+                <button class="modal-close-btn" onclick="closeAccountDelete()" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="field-group" id="acctMergeWrap">
+                    <label for="acctMergeInto">Move its transactions to</label>
+                    <select id="acctMergeInto" class="select-input"></select>
+                </div>
+                <div class="import-hint" id="acctDeleteNote"></div>
+            </div>
+            <div class="modal-footer">
+                <div class="modal-footer-msg"></div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-modal-cancel" onclick="closeAccountDelete()">Cancel</button>
+                    <button type="button" class="btn-modal-save" id="acctDeleteGo" onclick="confirmAccountDelete()">Delete</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Import folder -->
     <div class="modal-overlay" id="importFolderOverlay" onclick="if (event.target === this) closeImportFolderModal()">
         <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="importFolderTitle" style="max-width: 600px;">
@@ -2065,6 +2140,7 @@
     <script src="/web/js/profiles.js"></script>
     <script src="/web/js/cardbills.js"></script>
     <script src="/web/js/walkthrough.js"></script>
+    <script src="/web/js/accounts.js"></script>
     <script src="/web/js/releases.js"></script>
     <script src="/web/js/updates.js"></script>
 </body>

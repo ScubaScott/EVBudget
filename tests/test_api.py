@@ -460,7 +460,7 @@ class ServerTests(TempAppCase):
         with self.get("/") as r:
             html = r.read().decode()
         from evbudget import VERSION
-        self.assertIn(f"v{VERSION:.1f}", html)
+        self.assertIn(f"v{VERSION}", html)
         self.assertNotIn("{{VERSION}}", html)
         for path in ("/web/dashboard.css", "/web/js/core.js", "/web/js/analytics.js", "/web/js/import.js"):
             with self.get(path) as r:

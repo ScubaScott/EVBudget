@@ -134,6 +134,12 @@ SCHEMA_STATEMENTS = [
         match_source TEXT,
         updated_at TEXT
     )""",
+    """CREATE TABLE IF NOT EXISTS accounts (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+        account_type TEXT NOT NULL DEFAULT 'Bank / Checking',
+        created_at TEXT
+    )""",
     """CREATE TABLE IF NOT EXISTS people (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,

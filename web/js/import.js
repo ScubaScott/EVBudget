@@ -349,7 +349,7 @@ async function importProcess() {
                 account_name: f.account_name, memory_key: f.memory_key
             }))
         });
-        importRecords = data.records.map(r => Object.assign({ skip: false, restore: false }, r));
+        importRecords = data.records.map(r => Object.assign({ skip: !!(r.likely_duplicate && r.status === 'new'), restore: false }, r));
         importSummaryData = data.summary;
         importEnvelopes = data.envelopes || configuredEnvelopesList;
         peopleList = data.people || peopleList;
@@ -375,8 +375,10 @@ function renderImportSummary() {
     const card = (cls, title, value, sub) => `
         <div class="kpi-card ${cls}"><div class="kpi-header"><span class="kpi-title">${title}</span></div>
         <div class="kpi-value ${cls}">${value}</div><div class="kpi-subtitle">${sub}</div></div>`;
+    renderImportDupNote();
     document.getElementById('importSummary').innerHTML =
-        card('income', 'New rows', s.new.toLocaleString(), 'Will be saved') +
+        card('income', 'New rows', (s.new - (s.likely_duplicates || 0)).toLocaleString(), 'Will be saved') +
+        (s.likely_duplicates ? card('net', 'Look already saved', s.likely_duplicates.toLocaleString(), 'Same date, amount and merchant. Left unticked') : '') +
         card('count', 'Already saved', s.existing.toLocaleString(), 'Left exactly as they are') +
         card('net', 'Need review', s.needs_review_new.toLocaleString(), 'Unmatched deposits and reimbursements') +
         card('spend', 'Excluded', s.excluded_new.toLocaleString(), 'Transfers and card payments') +
@@ -390,6 +392,7 @@ function importRowMatchesFilter(r) {
         case 'new': return r.status === 'new';
         case 'existing': return r.status === 'existing';
         case 'excluded': return !r.is_included;
+        case 'duplicate': return !!r.likely_duplicate && r.status === 'new';
         case 'review': return !!r.needs_review && r.status !== 'existing';
         case 'deleted': return r.status === 'deleted';
         default: return true;
@@ -439,7 +442,8 @@ function renderImportChips() {
         return ok;
     }).length;
     const chips = [
-        ['all', 'All'], ['new', 'New'], ['existing', 'Already saved'], ['review', 'Needs review'],
+        ['all', 'All'], ['new', 'New'], ...(importSummaryData && importSummaryData.likely_duplicates ? [['duplicate', 'Look already saved']] : []),
+        ['existing', 'Already saved'], ['review', 'Needs review'],
         ['excluded', 'Excluded'], ['deleted', 'Deleted earlier']
     ];
     document.getElementById('importChips').innerHTML = chips.map(([key, label]) =>
@@ -484,6 +488,48 @@ async function importOpenRule(id) {
     editImportRule(id);
 }
 
+// Under the payee of a row that looks like one already saved, say which one
+function importDupHint(r) {
+    const d = r.likely_duplicate;
+    if (!d || r.status !== 'new') return '';
+    const where = [d.account_name, d.source_file].filter(Boolean).join(', ');
+    return `<div class="import-dup-hint">Looks like ${escapeHtml(formatDisplayDate(d.date))} &ldquo;${escapeHtml(d.name)}&rdquo;${where ? ' already saved from ' + escapeHtml(where) : ' already saved'}</div>`;
+}
+
+// What to do about rows that look like ones already saved, and the tip for a replaced card
+function renderImportDupNote() {
+    const box = document.getElementById('importDupNote');
+    const n = importSummaryData ? (importSummaryData.likely_duplicates || 0) : 0;
+    if (!n) { box.hidden = true; return; }
+    box.hidden = false;
+    box.innerHTML = `<strong>${n.toLocaleString()} row${n === 1 ? '' : 's'} look like transactions you already saved</strong> (same date, amount and merchant), probably under another account. This happens when a card is reissued with a new number, or a statement covers days an earlier file already had. They start unticked so they are not saved twice.
+        Tick one if it really is a separate purchase.
+        <button type="button" class="btn-inline-action btn-inline-cancel" onclick="importTickDuplicates(true)">Tick them anyway</button>
+        <button type="button" class="btn-inline-action btn-inline-cancel" onclick="setImportFilter('duplicate')">Show only these</button>
+        <div class="import-hint" style="margin-top: 6px;">Replacing a card? After saving, Import &rarr; Accounts &rarr; Merge puts the old and new card in one account.</div>`;
+}
+
+function importTickDuplicates(tick) {
+    importRecords.forEach(r => { if (r.likely_duplicate && r.status === 'new') r.skip = !tick; });
+    importRenderGrid();
+}
+
+// The Save box in the header: every new row that is currently shown
+function importToggleSaveAll(checked) {
+    importVisibleRows().forEach(({ r }) => { if (r.status === 'new') r.skip = !checked; });
+    importRenderGrid();
+}
+
+function updateImportSaveAll() {
+    const box = document.getElementById('importSaveAll');
+    if (!box) return;
+    const shown = importVisibleRows().filter(({ r }) => r.status === 'new');
+    const ticked = shown.filter(({ r }) => !r.skip).length;
+    box.disabled = shown.length === 0;
+    box.checked = shown.length > 0 && ticked === shown.length;
+    box.indeterminate = ticked > 0 && ticked < shown.length;
+}
+
 function importRowHtml(r, idx) {
     const locked = r.status !== 'new';
     const dis = locked ? 'disabled' : '';
@@ -494,6 +540,7 @@ function importRowHtml(r, idx) {
     if (r.skip) classes.push('import-row-skipped');
     if (!r.is_included) classes.push('excluded-row');
     if (r.needs_review && r.status === 'new') classes.push('import-row-review');
+    if (r.likely_duplicate && r.status === 'new') classes.push('import-row-dup');
 
     let target = '';
     if (INCOME_KINDS.includes(r.txn_kind)) {
@@ -516,6 +563,7 @@ function importRowHtml(r, idx) {
 
     let statusCell = `<span class="import-status import-status-${r.status}">${IMPORT_STATUS_LABELS[r.status] || r.status}</span>`;
     if (r.needs_review && r.status === 'new') statusCell += ' <span class="kind-badge kind-review" title="Needs a decision">Review</span>';
+    if (r.likely_duplicate && r.status === 'new') statusCell += ' <span class="kind-badge kind-review" title="This looks like a transaction you already saved. Tick the box if it is a different one.">Looks saved</span>';
     if (r.status === 'deleted') statusCell += ` <button type="button" class="btn-inline-action btn-inline-save" onclick="importRestore(${idx})">Restore</button>`;
 
     const saveCell = r.status === 'new'
@@ -527,7 +575,7 @@ function importRowHtml(r, idx) {
         <td style="text-align:center;">${saveCell}</td>
         <td style="text-align:center;">${inclCell}</td>
         <td style="white-space:nowrap;">${escapeHtml(formatDisplayDate(r.date))}</td>
-        <td><input type="text" class="input-text import-name" ${dis} value="${escapeHtml(r.name)}" title="${escapeHtml(r.raw_name)}" onchange="importSetField(${idx}, 'name', this.value)">${importOriginalText(r)}</td>
+        <td><input type="text" class="input-text import-name" ${dis} value="${escapeHtml(r.name)}" title="${escapeHtml(r.raw_name)}" onchange="importSetField(${idx}, 'name', this.value)">${importOriginalText(r)}${importDupHint(r)}</td>
         <td class="amount-cell ${amtClass}">${isNeg ? '-' : '+'}${formatCurrency(Math.abs(r.amount))}</td>
         <td><select class="select-input import-mini import-kind" ${dis} onchange="importSetKind(${idx}, this.value)">${importKindOptions(r.txn_kind)}</select></td>
         <td><div class="import-target">${target}</div></td>
@@ -550,6 +598,7 @@ function importRenderGrid() {
     }
     document.getElementById('importGridBody').innerHTML = html;
     updateImportSaveBar();
+    updateImportSaveAll();
 }
 
 function updateImportSaveBar() {
@@ -748,7 +797,7 @@ let importSub = 'import';
 // keepForm: the caller is about to fill the rule form itself, so don't clear it
 async function showImportSub(name, keepForm) {
     importSub = name;
-    ['import', 'rules', 'history'].forEach(n => {
+    ['import', 'accounts', 'rules', 'history'].forEach(n => {
         document.getElementById('importSub' + n.charAt(0).toUpperCase() + n.slice(1)).hidden = (n !== name);
         const btn = document.getElementById('importSubBtn-' + n);
         btn.classList.toggle('active', n === name);
@@ -760,6 +809,7 @@ async function showImportSub(name, keepForm) {
         resetRuleForm();
     }
     if (name === 'history') loadImportHistory();
+    if (name === 'accounts') loadAccounts();
 }
 
 async function loadImportRules() {

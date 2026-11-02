@@ -1,13 +1,18 @@
-"""Card / account names: which card or account each imported transaction came from.
+"""Accounts: which card or account each imported transaction came from.
 
 A name is chosen on each import (suggested from the file name, or from the last four digits on a PDF statement)
 and remembered, so the next month's file for the same card gets the same name. Transactions imported before
 names existed are grouped by file here, so they can be named in one pass.
+
+Accounts are a managed list (the accounts table): add, rename, change type, merge, delete. A transaction keeps the
+account's name as text, so renaming or merging rewrites it. No balances are tracked. Any name that appears on a
+transaction (from an import or an older budget) is added to the list the next time it is read.
 """
 
 import json
 import os
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from . import pdf_statements, store
@@ -73,8 +78,132 @@ def remember(conn: Any, key: str, name: str) -> None:
 
 
 def known_names(conn: Any) -> List[str]:
-    return [r[0] for r in conn.execute(
-        "SELECT DISTINCT account_name FROM transactions WHERE account_name IS NOT NULL AND account_name != '' ORDER BY account_name COLLATE NOCASE")]
+    adopt_names(conn)
+    return [r[0] for r in conn.execute("SELECT name FROM accounts ORDER BY name COLLATE NOCASE")]
+
+
+# ---------------------------------------------------------------------------
+# The managed list of accounts
+# ---------------------------------------------------------------------------
+
+ACCOUNT_TYPES = ("Bank / Checking", "Credit / Debit", "Savings", "Other")
+DEFAULT_TYPE = "Bank / Checking"
+
+
+def adopt_names(conn: Any) -> None:
+    """Add any account name that is on a transaction but not in the list yet. Its type is the one most of its
+    transactions carry."""
+    best: Dict[str, Any] = {}
+    for r in conn.execute(
+        """SELECT account_name AS n, account_type AS t, COUNT(*) AS c FROM transactions
+           WHERE account_name IS NOT NULL AND account_name != '' GROUP BY account_name, account_type""").fetchall():
+        if r["t"] in ACCOUNT_TYPES and (r["n"] not in best or r["c"] > best[r["n"]][1]):
+            best[r["n"]] = (r["t"], r["c"])
+        else:
+            best.setdefault(r["n"], (DEFAULT_TYPE, 0))
+    now = datetime.now().isoformat()
+    for name, (kind, _) in best.items():
+        conn.execute("INSERT OR IGNORE INTO accounts (name, account_type, created_at) VALUES (?, ?, ?)", (name, kind, now))
+
+
+def list_accounts(conn: Any) -> List[Dict[str, Any]]:
+    """Every account with how much is in it and which import files it came from."""
+    adopt_names(conn)
+    stats = {r["n"].lower(): r for r in conn.execute(
+        """SELECT account_name AS n, COUNT(*) AS c, MIN(date) AS a, MAX(date) AS b FROM transactions
+           WHERE account_name IS NOT NULL AND account_name != '' GROUP BY account_name""")}
+    files: Dict[str, set] = {}
+    for r in conn.execute("SELECT DISTINCT account_name AS n, source_file AS f FROM transactions WHERE account_name IS NOT NULL AND account_name != ''"):
+        for f in (r["f"] or "").split(","):
+            if f.strip():
+                files.setdefault(r["n"].lower(), set()).add(f.strip())
+    out = []
+    for a in conn.execute("SELECT id, name, account_type FROM accounts ORDER BY name COLLATE NOCASE"):
+        s = stats.get(a["name"].lower())
+        out.append({
+            "id": a["id"], "name": a["name"], "account_type": a["account_type"],
+            "transactions": s["c"] if s else 0, "first_date": s["a"] if s else None, "last_date": s["b"] if s else None,
+            "files": sorted(files.get(a["name"].lower(), ())),
+        })
+    return out
+
+
+def _clean_type(value: Any) -> str:
+    return value if value in ACCOUNT_TYPES else DEFAULT_TYPE
+
+
+def _find(conn: Any, name: str) -> Any:
+    return conn.execute("SELECT id, name FROM accounts WHERE name = ?", (name,)).fetchone()
+
+
+def _rewrite_name(conn: Any, old: str, new: str) -> None:
+    """Move everything that points at an account's old name to its new one."""
+    conn.execute("UPDATE transactions SET account_name = ? WHERE account_name = ? COLLATE NOCASE", (new, old))
+    conn.execute("UPDATE OR IGNORE card_bill_checks SET card = ? WHERE card = ? COLLATE NOCASE", (new, old))
+    conn.execute("DELETE FROM card_bill_checks WHERE card = ? COLLATE NOCASE", (old,))
+    memory = load_memory(conn)
+    changed = False
+    for k, v in list(memory.items()):
+        if str(v).lower() == old.lower():
+            memory[k], changed = new, True
+    if changed:
+        store.set_setting(conn, "import_account_names", json.dumps(memory))
+
+
+def save_account(conn: Any, account_id: Optional[int], name: Any, account_type: Any) -> int:
+    """Create an account, or rename it / change its type. Raises ValueError with a message the user can act on."""
+    name = clean_name(name)
+    if not name:
+        raise ValueError("Give the account a name.")
+    kind = _clean_type(account_type)
+    clash = _find(conn, name)
+    if account_id is None:
+        if clash:
+            raise ValueError(f"There is already an account called '{clash['name']}'.")
+        return conn.execute("INSERT INTO accounts (name, account_type, created_at) VALUES (?, ?, ?)",
+                            (name, kind, datetime.now().isoformat())).lastrowid
+    row = conn.execute("SELECT id, name FROM accounts WHERE id = ?", (account_id,)).fetchone()
+    if row is None:
+        raise ValueError("That account no longer exists.")
+    if clash and clash["id"] != account_id:
+        raise ValueError(f"There is already an account called '{clash['name']}'. Use Merge to combine them.")
+    if row["name"] != name:
+        _rewrite_name(conn, row["name"], name)
+    conn.execute("UPDATE accounts SET name = ?, account_type = ? WHERE id = ?", (name, kind, account_id))
+    conn.execute("UPDATE transactions SET account_type = ? WHERE account_name = ? COLLATE NOCASE", (kind, name))
+    return account_id
+
+
+def delete_account(conn: Any, account_id: int, merge_into: Optional[int] = None) -> int:
+    """Remove an account. One that has transactions must be merged into another account, so none are left behind.
+    Returns how many transactions moved."""
+    row = conn.execute("SELECT id, name FROM accounts WHERE id = ?", (account_id,)).fetchone()
+    if row is None:
+        raise ValueError("That account no longer exists.")
+    count = conn.execute("SELECT COUNT(*) FROM transactions WHERE account_name = ? COLLATE NOCASE", (row["name"],)).fetchone()[0]
+    moved = 0
+    if count:
+        target = conn.execute("SELECT id, name, account_type FROM accounts WHERE id = ?", (merge_into,)).fetchone() if merge_into else None
+        if target is None or target["id"] == account_id:
+            raise ValueError(f"'{row['name']}' has {count} transaction{'' if count == 1 else 's'}. Choose another account to merge them into.")
+        _rewrite_name(conn, row["name"], target["name"])
+        conn.execute("UPDATE transactions SET account_type = ? WHERE account_name = ? COLLATE NOCASE", (target["account_type"], target["name"]))
+        moved = count
+    conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+    return moved
+
+
+def assign_account(conn: Any, name: Any, account_type: str = DEFAULT_TYPE) -> str:
+    """The account a transaction is being moved to; created if it is new. An empty name means no account."""
+    name = clean_name(name)
+    if not name:
+        return ""
+    existing = _find(conn, name)
+    if existing:
+        return existing["name"]
+    conn.execute("INSERT INTO accounts (name, account_type, created_at) VALUES (?, ?, ?)",
+                 (name, _clean_type(account_type), datetime.now().isoformat()))
+    return name
 
 
 def list_cards(conn: Any) -> List[Dict[str, Any]]:

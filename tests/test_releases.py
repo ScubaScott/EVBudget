@@ -21,7 +21,7 @@ class ReleaseFileTests(unittest.TestCase):
 
     def test_current_version_has_release_notes(self):
         # Bumping VERSION without writing notes in evbudget/releases.json fails here, so notes aren't forgotten.
-        self.assertEqual(releases.load()[0]["version"], f"{VERSION:.1f}")
+        self.assertEqual(releases.load()[0]["version"], VERSION)
 
 
 class UnseenTests(unittest.TestCase):
@@ -73,7 +73,7 @@ class ReleaseApiTests(TempAppCase):
     def test_existing_budget_sees_the_latest_once(self):
         self.add_txn()
         first = self.get()
-        self.assertEqual([r["version"] for r in first["unseen"]], [first["releases"][0]["version"]])
+        self.assertEqual([r["version"] for r in first["unseen"]], [r["version"] for r in first["releases"][:releases.NEVER_SHOWN_LIMIT]])
         self.call(self.app.releases_seen, {"version": first["releases"][0]["version"]})
         again = self.get()
         self.assertEqual(again["unseen"], [])
@@ -113,7 +113,7 @@ class ReleaseApiTests(TempAppCase):
 
     def test_about_has_the_details_for_a_report(self):
         a = self.call(self.app.about_get, method="GET")
-        self.assertEqual(a["version"], f"{VERSION:.1f}")
+        self.assertEqual(a["version"], VERSION)
         self.assertEqual(a["schema_version"], 2)
         for key in ("python", "os", "git", "latest_release", "release_date"):
             self.assertIn(key, a)

@@ -6,12 +6,13 @@ from noting which file they were seen in again.
 """
 
 import csv
+import difflib
 import json
 import os
 import re
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import billmatch, cards, paths, pdf_statements, rules, store
@@ -353,6 +354,71 @@ def _deleted_ids(conn: Any, ids: List[str]) -> set:
     return found
 
 
+DUPLICATE_DAYS = 3          # a purchase can post a few days after it happened
+DUPLICATE_MIN_SIMILARITY = 0.5
+
+
+def _name_key(text: str) -> List[str]:
+    return re.sub(r"[^A-Z0-9 ]", " ", (text or "").upper()).split()
+
+
+def name_similarity(a: str, b: str) -> float:
+    """0 to 1: how alike two descriptions of the same merchant are. A bank file and its statement PDF word the same
+    purchase differently ("TACO BELL 7005058" and "TACO BELL 7005058 952-942-5766 MN"), so one being the start of
+    the other, or most of its words appearing in the other, counts as a match."""
+    ta, tb = _name_key(a), _name_key(b)
+    if not ta or not tb:
+        return 0.0
+    short, long_ = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
+    contained = sum(1 for w in short if w in long_) / len(short)
+    prefix = 1.0 if long_[:len(short)] == short else 0.0
+    ratio = difflib.SequenceMatcher(None, " ".join(ta), " ".join(tb)).ratio()
+    return max(contained, prefix, ratio)
+
+
+def find_likely_duplicates(conn: Any, records: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """New rows that are probably transactions already saved from another file: the same amount, within a few days,
+    and a similar merchant. This is what happens when a card is reissued with a new number, or a statement PDF
+    covers days an earlier CSV already brought in. Each saved row can explain only one new row, so three identical
+    purchases on one day need three saved ones. Returns {new txn_id: the saved row it looks like}."""
+    new = [r for r in records if r.get("status") == "new" and r.get("amount")]
+    if not new:
+        return {}
+    dates = sorted(date.fromisoformat(r["date"]) for r in new)
+    low, high = (dates[0] - timedelta(days=DUPLICATE_DAYS)).isoformat(), (dates[-1] + timedelta(days=DUPLICATE_DAYS)).isoformat()
+    by_amount: Dict[float, List[Dict[str, Any]]] = {}
+    for e in conn.execute(
+        "SELECT txn_id, date, name, raw_name, amount, account_name, source_file FROM transactions WHERE date BETWEEN ? AND ?", (low, high)
+    ):
+        by_amount.setdefault(round(float(e["amount"]), 2), []).append(dict(e))
+
+    pairs = []
+    for i, r in enumerate(new):
+        day = date.fromisoformat(r["date"])
+        for e in by_amount.get(round(float(r["amount"]), 2), []):
+            apart = abs((date.fromisoformat(e["date"]) - day).days)
+            if apart > DUPLICATE_DAYS or e["txn_id"] == r["txn_id"]:
+                continue
+            files = [f.strip() for f in (e["source_file"] or "").split(",")]
+            if r.get("source_file") and r["source_file"] in files:
+                continue                      # saved from this very file: the normal duplicate check handles it
+            score = max(name_similarity(r["raw_name"], e["raw_name"]), name_similarity(r.get("name") or "", e["name"] or ""))
+            if score >= DUPLICATE_MIN_SIMILARITY:
+                pairs.append((apart, -score, i, e["txn_id"], e))
+    pairs.sort(key=lambda p: (p[0], p[1], p[2]))
+    taken_new, taken_saved, out = set(), set(), {}
+    for _, _, i, saved_id, e in pairs:
+        if i in taken_new or saved_id in taken_saved:
+            continue
+        taken_new.add(i)
+        taken_saved.add(saved_id)
+        out[new[i]["txn_id"]] = {
+            "txn_id": saved_id, "date": e["date"], "name": e["name"] or e["raw_name"], "account_name": e["account_name"] or "",
+            "source_file": (e["source_file"] or "").split(",")[0].strip(),
+        }
+    return out
+
+
 def build_preview(conn: Any, file_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Parse and classify the chosen files. Nothing is written.
 
@@ -419,6 +485,11 @@ def build_preview(conn: Any, file_infos: List[Dict[str, Any]]) -> Dict[str, Any]
             )
             records.append(rec)
 
+    likely = find_likely_duplicates(conn, records)
+    for rec in records:
+        if rec["txn_id"] in likely and rec["status"] == "new":
+            rec["likely_duplicate"] = likely[rec["txn_id"]]
+
     records.sort(key=lambda r: (r["date"], r["txn_id"]), reverse=True)
     counts = {s: sum(1 for r in records if r["status"] == s) for s in ("new", "existing", "deleted")}
     return {
@@ -426,6 +497,7 @@ def build_preview(conn: Any, file_infos: List[Dict[str, Any]]) -> Dict[str, Any]
         "summary": {
             "total": len(records),
             "new": counts["new"],
+            "likely_duplicates": len(likely),
             "existing": counts["existing"],
             "deleted": counts["deleted"],
             "excluded_new": sum(1 for r in records if r["status"] == "new" and not r["is_included"]),
