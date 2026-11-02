@@ -1,0 +1,12 @@
+#!/bin/sh
+# Runs before every push. Stops a push to main that changes the app without a new version,
+# release notes, and a CHANGELOG.md line. Turn on once per computer:  git config core.hooksPath .githooks
+# Skip once on purpose:  git push --no-verify
+root="$(git rev-parse --show-toplevel)"
+for py in python python3 py; do
+    if command -v "$py" >/dev/null 2>&1 && "$py" -c "import sys" >/dev/null 2>&1; then
+        exec "$py" "$root/tools/check_release.py" --pre-push "$@"
+    fi
+done
+echo "Release check skipped: Python was not found." >&2
+exit 0
