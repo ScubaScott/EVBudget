@@ -310,8 +310,19 @@ function handleMatchOverlayClick(event) {
 // ---------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------
+// How tall the pinned header + tab bar is, so sticky panels can sit just below it
+function trackPinnedHeaderHeight() {
+    const top = document.querySelector('.app-top');
+    if (!top) return;
+    const set = () => document.documentElement.style.setProperty('--app-top-h', top.offsetHeight + 'px');
+    set();
+    if (window.ResizeObserver) new ResizeObserver(set).observe(top);
+    window.addEventListener('resize', set);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     applyTheme(currentTheme);
+    trackPinnedHeaderHeight();
     setupTabs();
     window.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') closeMatchModal();

@@ -8,17 +8,35 @@ async function relLoad() {
     return relData;
 }
 
-function relRender(list, heading) {
-    document.getElementById('relTitle').textContent = heading;
-    document.getElementById('relBody').innerHTML = list.map((r, i) => `
-        <section class="rel-entry${i === 0 ? ' rel-latest' : ''}">
-            <div class="rel-head"><span class="rel-version">Version ${escapeHtml(r.version)}</span>
+const REL_TAGS = { new: 'New', improved: 'Improved', fixed: 'Fixed' };
+
+function relNotesHtml(r) {
+    return `<ul class="rel-notes">${r.notes.map(n => `<li>${n.type ? `<span class="rel-tag rel-tag-${n.type}">${REL_TAGS[n.type]}</span>` : ''}${escapeHtml(n.text)}</li>`).join('')}</ul>`;
+}
+
+function relHeadHtml(r) {
+    return `<div class="rel-head"><span class="rel-version">Version ${escapeHtml(r.version)}</span>
                 <span class="rel-date">${escapeHtml(formatDisplayDate(r.date))}</span></div>
-            <div class="rel-name">${escapeHtml(r.title)}</div>
-            <ul class="rel-notes">${r.notes.map(n => `<li>${escapeHtml(n)}</li>`).join('')}</ul>
-        </section>`).join('') || '<div class="import-more">No release notes yet.</div>';
-    document.getElementById('relSub').textContent = list.length > 1 && heading === "What's new"
-        ? 'Everything since you last looked.' : '';
+            <div class="rel-name">${escapeHtml(r.title)}</div>`;
+}
+
+// One section per version. With collapseOlder, only the newest is open; the others open with a click.
+function relEntriesHtml(list, collapseOlder) {
+    if (!list.length) return '<div class="import-more">No release notes yet.</div>';
+    return list.map((r, i) => (collapseOlder && i > 0)
+        ? `<details class="rel-entry"><summary>${relHeadHtml(r)}</summary>${relNotesHtml(r)}</details>`
+        : `<section class="rel-entry${i === 0 ? ' rel-latest' : ''}">${relHeadHtml(r)}${relNotesHtml(r)}</section>`).join('');
+}
+
+function relNameList(versions) {
+    const v = versions.map(x => x);
+    return v.length < 2 ? (v[0] || '') : v.slice(0, -1).join(', ') + ' and ' + v[v.length - 1];
+}
+
+function relShow(title, sub, html) {
+    document.getElementById('relTitle').textContent = title;
+    document.getElementById('relSub').textContent = sub;
+    document.getElementById('relBody').innerHTML = html;
     document.getElementById('whatsNewOverlay').classList.add('active');
     document.body.style.overflow = 'hidden';
     document.getElementById('relDone').focus();
@@ -29,11 +47,11 @@ function closeWhatsNew() {
     if (!document.querySelector('.modal-overlay.active')) document.body.style.overflow = '';
 }
 
-// Help > What's new: the whole history, newest first
+// Help > What's new: every version, newest first, one section each
 async function openReleaseHistory() {
     try {
         const d = relData || await relLoad();
-        relRender(d.releases, 'Release history');
+        relShow("What's new", `You're on version ${d.current}. Older versions are below; click one to open it.`, relEntriesHtml(d.releases, true));
     } catch (err) {
         showToast('Could not load release notes: ' + err.message, true);
     }
@@ -44,7 +62,9 @@ async function relCheckOnStart() {
     let d;
     try { d = await relLoad(); } catch (err) { return; }
     if (!d.unseen.length) return;
-    relRender(d.unseen, "What's new");
+    const names = relNameList(d.unseen.map(r => r.version).reverse());
+    if (d.from_version) relShow(`Updated to version ${d.current}`, `You were on ${d.from_version}. Here is what changed in ${names}.`, relEntriesHtml(d.unseen, false));
+    else relShow("What's new", `Here is what's new in version${d.unseen.length > 1 ? 's' : ''} ${names}.`, relEntriesHtml(d.unseen, false));
     apiPost('/api/releases/seen', { version: d.unseen[0].version }).catch(() => { /* shown again next time */ });
 }
 

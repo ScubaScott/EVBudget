@@ -4,17 +4,74 @@
     "date": "2026-11-01",
     "title": "Setup walkthrough, themes, and feedback",
     "notes": [
-      "Spending and Income are now one page. Use the Spending | Income toggle to switch the charts; there is a single transaction log below.",
-      "New setup walkthrough: a guide that takes you from an empty budget to a working one, step by step. Open it any time from Help.",
-      "Deposits we noticed: the Income view now spots repeating paychecks and turns them into pay sources with one click.",
-      "You can add a new person right inside the pay source dialog.",
-      "Manage envelopes is now on the Budget tab, so you can set up envelopes before go-live.",
-      "Go-live now starts today by default, so balances show up right away.",
-      "New Disney color theme, and the theme picker in Settings is now a dropdown.",
-      "A divider now separates Spending, Bills, and Goals on the Envelopes screen.",
-      "Help now has What's new (this list) and Submit feedback.",
-      "Updates now come from the app: an Update available button appears at the top when there is a new version (Help > Check for updates). The launch shortcut no longer pulls from git.",
-      "Submit feedback now opens in your email app instead of replacing the EVBudget window."
+      {
+        "type": "improved",
+        "text": "Spending and Income are now one page. Use the Spending | Income toggle to switch the charts; there is a single transaction log below."
+      },
+      {
+        "type": "improved",
+        "text": "Fill templates now save automatically, and Generate all from budget rebuilds every pay source's template at once. The tab bar also stays pinned to the top while you scroll."
+      },
+      {
+        "type": "new",
+        "text": "New setup walkthrough: a guide that takes you from an empty budget to a working one, step by step. Open it any time from Help."
+      },
+      {
+        "type": "new",
+        "text": "Deposits we noticed: the Income view now spots repeating paychecks and turns them into pay sources with one click."
+      },
+      {
+        "type": "improved",
+        "text": "You can add a new person right inside the pay source dialog."
+      },
+      {
+        "type": "improved",
+        "text": "Manage envelopes is now on the Budget tab, so you can set up envelopes before go-live."
+      },
+      {
+        "type": "improved",
+        "text": "Go-live now starts today by default, so balances show up right away."
+      },
+      {
+        "type": "new",
+        "text": "New Disney color theme, and the theme picker in Settings is now a dropdown."
+      },
+      {
+        "type": "improved",
+        "text": "A divider now separates Spending, Bills, and Goals on the Envelopes screen."
+      },
+      {
+        "type": "new",
+        "text": "Help now has What's new (this list) and Submit feedback."
+      },
+      {
+        "type": "new",
+        "text": "Updates now come from the app: an Update available button appears at the top when there is a new version (Help > Check for updates). The launch shortcut no longer pulls from git."
+      },
+      {
+        "type": "improved",
+        "text": "Submit feedback now opens in your email app instead of replacing the EVBudget window."
+      },
+      {
+        "type": "new",
+        "text": "You can now choose which folder bank files are read from: Import > Change folder. Each budget remembers its own."
+      },
+      {
+        "type": "new",
+        "text": "Rules is now a full page under Import (Import | Rules | History), with the list and editor side by side. Every way of applying rules (one rule, or all of them) opens the same review screen: a tick box on each change, hand-edited rows marked and unticked, and nothing changes until you press Apply."
+      },
+      {
+        "type": "improved",
+        "text": "Selecting transactions now shows one Bulk update button with every option (payee, envelope, status, kind) in a single window."
+      },
+      {
+        "type": "fixed",
+        "text": "Fixed: after a bulk update left a filter with no matching transactions, the charts could break and the page kept saying it could not connect until you restarted. It now refreshes normally."
+      },
+      {
+        "type": "improved",
+        "text": "What's new is clearer: after an update it lists every version since the one you were on, the update window previews the changes before you install, and Help > What's new shows each version separately."
+      }
     ]
   }
 ]

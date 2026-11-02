@@ -16,6 +16,8 @@
 <body>
 
     <!-- Header Bar -->
+    <!-- Header and tab bar stay pinned to the top of the window together -->
+    <div class="app-top">
     <header class="app-header">
         <div class="brand-area">
             <img class="brand-icon" src="/web/img/evbudget.png" alt="" width="36" height="36">
@@ -93,6 +95,7 @@
         <button type="button" class="tab-btn" id="tabBtn-budget" onclick="showTab('budget')">Budget</button>
         <button type="button" class="tab-btn" id="tabBtn-import" onclick="showTab('import')">Import</button>
     </nav>
+    </div>
 
     <!-- Main Content Area -->
     <main class="dashboard-container">
@@ -100,18 +103,27 @@
         <!-- ===================== IMPORT TAB ===================== -->
         <div class="tab-panel" id="tab-import" hidden>
 
+            <!-- Import | Rules | History: one slim row, same control as Spending | Income -->
+            <div class="view-toggle-bar">
+                <div class="segmented-toggle" role="tablist" aria-label="Import sections">
+                    <button type="button" class="segmented-btn active" id="importSubBtn-import" role="tab" onclick="showImportSub('import')">Import</button>
+                    <button type="button" class="segmented-btn" id="importSubBtn-rules" role="tab" onclick="showImportSub('rules')">Rules</button>
+                    <button type="button" class="segmented-btn" id="importSubBtn-history" role="tab" onclick="showImportSub('history')">History</button>
+                </div>
+            </div>
+
+            <div id="importSubImport">
+
             <!-- Step 1: choose files -->
             <section class="import-card">
                 <div class="table-header">
                     <div>
                         <div class="table-title">1. Choose bank files</div>
-                        <div class="table-subtitle">Files in the <code>DataFiles\input</code> folder. Drop new CSV exports below to add them. Nothing is saved until step 2.</div>
+                        <div class="table-subtitle">Files in <code id="importFolderLabel" class="import-folder-label">this budget's input folder</code>. Drop new CSV exports below to add them. Nothing is saved until step 2.</div>
                     </div>
                     <div class="table-header-actions">
-                        <button class="btn-refresh" onclick="importScanFolder()">Refresh folder</button>
-                        <button class="btn-refresh" onclick="openImportRulesModal()">Rules</button>
-                        <button class="btn-refresh" onclick="openReclassifyModal()">Re-run rules&hellip;</button>
-                        <button class="btn-refresh" onclick="openImportHistoryModal()">History</button>
+                        <button class="btn-refresh" onclick="importScanFolder()" title="Look in the import folder again">Refresh folder</button>
+                        <button class="btn-refresh" id="btnChangeImportFolder" onclick="openImportFolderModal()" title="Choose which folder bank files are read from">Change folder&hellip;</button>
                     </div>
                 </div>
 
@@ -198,6 +210,186 @@
                     </div>
                 </section>
             </section>
+            </div>
+
+            <!-- ===== Rules ===== -->
+            <div id="importSubRules" hidden>
+
+                <!-- Browse and edit: the list on the left, the editor beside it -->
+                <div id="rulesBrowse">
+                    <div class="import-hint rules-intro">A rule finds something in a transaction and does one or more things to it. Rules run from the top. For each thing a rule can do (the name, the envelope, what kind of transaction it is) the first rule that does it wins. Every budget uses the same rules. Changes apply to future imports; use <strong>Apply&hellip;</strong> to preview and update saved transactions too.</div>
+                    <div class="rules-layout">
+                        <section class="table-card rules-list-card">
+                            <div class="rules-toolbar">
+                                <div class="segmented-toggle" id="ruleFilterToggle">
+                                    <button class="segmented-btn active" data-filter="all" onclick="setRuleFilter('all')">All</button>
+                                    <button class="segmented-btn" data-filter="rename" onclick="setRuleFilter('rename')">Renames</button>
+                                    <button class="segmented-btn" data-filter="envelope" onclick="setRuleFilter('envelope')">Envelopes</button>
+                                    <button class="segmented-btn" data-filter="kind" onclick="setRuleFilter('kind')">Kinds</button>
+                                    <button class="segmented-btn" data-filter="attention" onclick="setRuleFilter('attention')">Needs attention <span id="ruleAttentionCount"></span></button>
+                                </div>
+                                <input type="text" id="ruleSearch" class="input-text" placeholder="Search rules&hellip;" oninput="renderImportRules()">
+                                <button type="button" class="btn-refresh" onclick="reviewAllRules()" title="Check every rule against all saved transactions, and choose which changes to make">Apply all rules&hellip;</button>
+                            </div>
+                            <div class="table-responsive-container">
+                                <table class="txn-table rules-table">
+                                    <thead>
+                                        <tr>
+                                            <th style="width: 44px; text-align: right;" title="Rules run from 1 down">#</th>
+                                            <th>Rule</th>
+                                            <th>Does</th>
+                                            <th style="width: 56px; text-align: center;">On</th>
+                                            <th style="width: 280px;">Order and actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="rulesBody"></tbody>
+                                </table>
+                            </div>
+                        </section>
+                        <aside class="table-card rules-editor-card">
+                            <div class="table-title" id="ruleEditorTitle">New rule</div>
+                            <div class="rule-form" id="ruleForm">
+                    <div class="rule-form-row">
+                        <label for="ruleName">Name</label>
+                        <input type="text" id="ruleName" class="input-text" maxlength="80" placeholder="e.g. Sam's Club"
+                               oninput="this.dataset.touched = '1'; onRuleFormChange()">
+                    </div>
+                    <div class="rule-form-row">
+                        <label for="ruleFindType">Find</label>
+                        <div class="rule-form-fields">
+                            <select id="ruleFindType" class="select-input" onchange="onRuleFormChange()">
+                                <option value="text">Text in the description</option>
+                                <option value="check">Any check</option>
+                                <option value="payment">Anything the bank marks as a payment</option>
+                                <option value="all">Everything</option>
+                            </select>
+                            <input type="text" id="ruleFindText" class="input-text" placeholder="Text to look for (e.g. SAMS CLUB)" oninput="onRuleFormChange()">
+                            <select id="ruleMatchMode" class="select-input" onchange="onRuleFormChange()" title="How the text is matched">
+                                <option value="contains">Contains</option>
+                                <option value="word">Whole word</option>
+                                <option value="regex">Pattern (advanced)</option>
+                            </select>
+                            <select id="ruleDirection" class="select-input" onchange="onRuleFormChange()">
+                                <option value="any">Money in or out</option>
+                                <option value="out">Money going out</option>
+                                <option value="in">Money coming in</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="rules-regex-hint" id="ruleRegexHint" hidden>
+                        A pattern can match more flexibly than plain text. For a rename, the part it matches is replaced; use <code>\1</code> (or <code>$1</code>) for the first (group) you captured. Example:
+                        <code>SQ\s?\*\s?(.*)</code> &rarr; <code>\1</code> turns <em>SQ *Vendor</em> into <em>Vendor</em>.
+                        Pattern renames chain, so several can apply to one payee. Give the rule a clear name so you can tell what it does at a glance.
+                    </div>
+                    <div class="rule-form-row">
+                        <label>Do</label>
+                        <div class="rule-do">
+                            <div class="rule-do-line">
+                                <label class="checkbox-row"><input type="checkbox" id="ruleDoRename" onchange="onRuleFormChange()"> Rename to</label>
+                                <input type="text" id="ruleRenameTo" class="input-text" placeholder="New name (e.g. Sam's Club)" oninput="onRuleFormChange()">
+                            </div>
+                            <div class="rule-do-line">
+                                <label class="checkbox-row"><input type="checkbox" id="ruleDoEnvelope" onchange="onRuleFormChange()"> Send to envelope</label>
+                                <select id="ruleEnvelope" class="select-input" onchange="onRuleFormChange()"></select>
+                            </div>
+                            <div class="rule-do-line">
+                                <label class="checkbox-row"><input type="checkbox" id="ruleDoKind" onchange="onRuleFormChange()"> Treat as</label>
+                                <select id="ruleKind" class="select-input" onchange="onRuleFormChange()">
+                                    <option value="expense">Spending (keep it, even if it looks like a transfer)</option>
+                                    <option value="refund">A refund or reimbursement</option>
+                                    <option value="other_income">Other income</option>
+                                    <option value="transfer">A transfer between my accounts (leave out)</option>
+                                    <option value="cc_payment">A card payment (leave out)</option>
+                                </select>
+                                <input type="text" id="ruleIncomeLabel" class="input-text" maxlength="60" placeholder="Income label (e.g. Tax Refund)" oninput="onRuleFormChange()">
+                            </div>
+                            <div class="rule-do-line">
+                                <label class="checkbox-row"><input type="checkbox" id="ruleDoReview" onchange="onRuleFormChange()"> Flag for review</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="rules-regex-preview" id="ruleEditorPreview"></div>
+                    <div class="rules-save-buttons">
+                        <button type="button" class="btn-modal-save" id="btnRuleSave" onclick="saveRuleFromForm()">Add rule</button>
+                        <button type="button" class="btn-modal-cancel" id="btnRuleCancel" onclick="resetRuleForm()" hidden>Cancel</button>
+                        <button type="button" class="btn-refresh" id="btnRuleRerun" onclick="reviewRuleFromForm()"
+                            title="See which saved transactions this rule would change, and choose which ones to update. Nothing changes until you press Apply.">Preview &amp; apply&hellip;</button>
+                    </div>
+                    <div class="import-hint">Preview &amp; apply works on the rule as it is in this form, even before you save it.</div>
+                </div>
+                        </aside>
+                    </div>
+                </div>
+
+                <!-- Review: what a rule (or all rules) would change, with a tick box on every row -->
+                <section class="table-card rules-review" id="rulesReview" hidden>
+                    <div class="table-header">
+                        <div>
+                            <div class="table-title" id="reviewTitle">Review changes</div>
+                            <div class="table-subtitle" id="reviewSub"></div>
+                        </div>
+                        <div class="table-header-actions">
+                            <button type="button" class="btn-refresh" onclick="closeReview()">&larr; Back to rules</button>
+                        </div>
+                    </div>
+                    <div class="review-bar">
+                        <label class="checkbox-row"><input type="checkbox" id="reviewSelectAll" onchange="reviewSelectAll(this.checked)"><span>Select all shown</span></label>
+                        <div class="segmented-toggle" id="reviewFilterToggle">
+                            <button class="segmented-btn active" data-show="all" onclick="reviewSetShow('all')">All</button>
+                            <button class="segmented-btn" data-show="normal" onclick="reviewSetShow('normal')">Not edited by hand</button>
+                            <button class="segmented-btn" data-show="edited" onclick="reviewSetShow('edited')">Edited by hand <span id="reviewEditedCount"></span></button>
+                        </div>
+                        <span id="reviewCount" class="import-hint"></span>
+                    </div>
+                    <div class="table-responsive-container">
+                        <table class="txn-table review-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 40px;"></th>
+                                    <th style="width: 100px;">Date</th>
+                                    <th>Payee</th>
+                                    <th style="width: 110px; text-align: right;">Amount</th>
+                                    <th>What would change</th>
+                                    <th style="width: 220px;">Because of rule</th>
+                                </tr>
+                            </thead>
+                            <tbody id="reviewBody"></tbody>
+                        </table>
+                    </div>
+                    <div class="review-more" id="reviewMore" hidden></div>
+                    <div class="review-actions">
+                        <span id="reviewWarn" class="review-warn"></span>
+                        <button type="button" class="btn-modal-cancel" onclick="closeReview()">Cancel</button>
+                        <button type="button" class="btn-modal-save" id="btnReviewApply" onclick="applyReview()" disabled>Apply 0 selected</button>
+                    </div>
+                </section>
+            </div>
+
+            <!-- ===== History ===== -->
+            <div id="importSubHistory" hidden>
+                <section class="table-card">
+                    <div class="table-header">
+                        <div>
+                            <div class="table-title">Import history</div>
+                            <div class="table-subtitle">The 20 most recent saves</div>
+                        </div>
+                    </div>
+                    <div class="table-responsive-container">
+                        <table class="txn-table">
+                            <thead>
+                                <tr>
+                                    <th>When</th>
+                                    <th>Files</th>
+                                    <th style="text-align: right;">New</th>
+                                    <th style="text-align: right;">Already there</th>
+                                    <th style="text-align: right;">Needs review</th>
+                                </tr>
+                            </thead>
+                            <tbody id="historyBody"></tbody>
+                        </table>
+                    </div>
+                </section>
+            </div>
         </div>
 
         <!-- ===================== ENVELOPES TAB ===================== -->
@@ -342,7 +534,10 @@
                 <div class="table-header">
                     <div>
                         <div class="table-title">Fill templates</div>
-                        <div class="table-subtitle">How each paycheck is split across envelopes. When a paycheck arrives, the template pre-fills the allocation.</div>
+                        <div class="table-subtitle">How each paycheck is split across envelopes. When a paycheck arrives, the template pre-fills the allocation. Changes save automatically.</div>
+                    </div>
+                    <div class="table-header-actions">
+                        <button class="btn-refresh" id="btnGenerateAll" onclick="templateGenerateAll()" title="Rebuild every pay source's template from the monthly budgets">Generate all from budget</button>
                     </div>
                 </div>
                 <div id="templatesWrap" class="templates-wrap"></div>
@@ -724,21 +919,9 @@
             <div class="bulk-action-bar" id="bulkActionBar" style="display: none;">
                 <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
                     <span class="bulk-selected-badge" id="bulkSelectedCount">0 selected</span>
-                    <button type="button" class="btn-bulk-action" onclick="openBulkModal('payee')">
+                    <button type="button" class="btn-bulk-action" onclick="openBulkModal()">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
-                        Change Payee Description
-                    </button>
-                    <button type="button" class="btn-bulk-action" onclick="openBulkModal('envelope')">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
-                        Change Envelope / Category
-                    </button>
-                    <button type="button" class="btn-bulk-action" onclick="openBulkModal('status')">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
-                        Change Status
-                    </button>
-                    <button type="button" class="btn-bulk-action" onclick="openBulkModal('kind')">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>
-                        Change Kind
+                        Bulk update&hellip;
                     </button>
                 </div>
                 <button type="button" class="btn-bulk-clear" onclick="clearAllSelections()">
@@ -982,8 +1165,8 @@
         <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="bulkModalTitle" style="max-width: 580px;">
             <div class="modal-header">
                 <div class="modal-title-wrap">
-                    <div class="modal-title" id="bulkModalTitle">Bulk Update Transactions</div>
-                    <div class="modal-subtitle" id="bulkModalSubtitle">Modify payee, envelope, status, and kind across selected records</div>
+                    <div class="modal-title" id="bulkModalTitle">Bulk update</div>
+                    <div class="modal-subtitle" id="bulkModalSubtitle">Change payee, envelope, status or kind on every selected transaction</div>
                 </div>
                 <button class="modal-close-btn" onclick="closeBulkModal()" title="Close">&times;</button>
             </div>
@@ -1777,188 +1960,37 @@
         </div>
     </div>
 
-    <!-- Rules -->
-    <div class="modal-overlay" id="rulesModalOverlay">
-        <div class="modal-container wide" role="dialog" aria-modal="true">
+    <!-- Import folder -->
+    <div class="modal-overlay" id="importFolderOverlay" onclick="if (event.target === this) closeImportFolderModal()">
+        <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="importFolderTitle" style="max-width: 600px;">
             <div class="modal-header">
                 <div class="modal-title-wrap">
-                    <div class="modal-title">Rules</div>
-                    <div class="modal-subtitle">A rule finds something in a transaction and does one or more things to it. Rules run from the top. For each thing a rule can do (the name, the envelope, what kind of transaction it is) the first rule that does it wins. Every budget uses the same rules.</div>
+                    <div class="modal-title" id="importFolderTitle">Import folder</div>
+                    <div class="modal-subtitle">Where EVBudget looks for bank files. Refresh folder reads this folder, and dropped files are saved into it.</div>
                 </div>
-                <button class="modal-close-btn" onclick="closeImportRulesModal()" title="Close">&times;</button>
+                <button class="modal-close-btn" onclick="closeImportFolderModal()" title="Close">&times;</button>
             </div>
             <div class="modal-body">
-                <div class="rule-form" id="ruleForm">
-                    <div class="rule-form-row">
-                        <label for="ruleName">Name</label>
-                        <input type="text" id="ruleName" class="input-text" maxlength="80" placeholder="e.g. Sam's Club"
-                               oninput="this.dataset.touched = '1'; onRuleFormChange()">
+                <div class="field-group">
+                    <label for="importFolderInput">Folder</label>
+                    <div class="picker-row">
+                        <input type="text" id="importFolderInput" class="input-text" spellcheck="false" placeholder="Paste or type a folder path" onkeydown="if (event.key === 'Enter') saveImportFolder()">
+                        <button type="button" class="btn-refresh" id="btnImportBrowse" onclick="importFolderBrowse()">Browse&hellip;</button>
                     </div>
-                    <div class="rule-form-row">
-                        <label for="ruleFindType">Find</label>
-                        <div class="rule-form-fields">
-                            <select id="ruleFindType" class="select-input" onchange="onRuleFormChange()">
-                                <option value="text">Text in the description</option>
-                                <option value="check">Any check</option>
-                                <option value="payment">Anything the bank marks as a payment</option>
-                                <option value="all">Everything</option>
-                            </select>
-                            <input type="text" id="ruleFindText" class="input-text" placeholder="Text to look for (e.g. SAMS CLUB)" oninput="onRuleFormChange()">
-                            <select id="ruleMatchMode" class="select-input" onchange="onRuleFormChange()" title="How the text is matched">
-                                <option value="contains">Contains</option>
-                                <option value="word">Whole word</option>
-                                <option value="regex">Pattern (advanced)</option>
-                            </select>
-                            <select id="ruleDirection" class="select-input" onchange="onRuleFormChange()">
-                                <option value="any">Money in or out</option>
-                                <option value="out">Money going out</option>
-                                <option value="in">Money coming in</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="rules-regex-hint" id="ruleRegexHint" hidden>
-                        A pattern can match more flexibly than plain text. For a rename, the part it matches is replaced; use <code>\1</code> (or <code>$1</code>) for the first (group) you captured. Example:
-                        <code>SQ\s?\*\s?(.*)</code> &rarr; <code>\1</code> turns <em>SQ *Vendor</em> into <em>Vendor</em>.
-                        Pattern renames chain, so several can apply to one payee. Give the rule a clear name so you can tell what it does at a glance.
-                    </div>
-                    <div class="rule-form-row">
-                        <label>Do</label>
-                        <div class="rule-do">
-                            <div class="rule-do-line">
-                                <label class="checkbox-row"><input type="checkbox" id="ruleDoRename" onchange="onRuleFormChange()"> Rename to</label>
-                                <input type="text" id="ruleRenameTo" class="input-text" placeholder="New name (e.g. Sam's Club)" oninput="onRuleFormChange()">
-                            </div>
-                            <div class="rule-do-line">
-                                <label class="checkbox-row"><input type="checkbox" id="ruleDoEnvelope" onchange="onRuleFormChange()"> Send to envelope</label>
-                                <select id="ruleEnvelope" class="select-input" onchange="onRuleFormChange()"></select>
-                            </div>
-                            <div class="rule-do-line">
-                                <label class="checkbox-row"><input type="checkbox" id="ruleDoKind" onchange="onRuleFormChange()"> Treat as</label>
-                                <select id="ruleKind" class="select-input" onchange="onRuleFormChange()">
-                                    <option value="expense">Spending (keep it, even if it looks like a transfer)</option>
-                                    <option value="refund">A refund or reimbursement</option>
-                                    <option value="other_income">Other income</option>
-                                    <option value="transfer">A transfer between my accounts (leave out)</option>
-                                    <option value="cc_payment">A card payment (leave out)</option>
-                                </select>
-                                <input type="text" id="ruleIncomeLabel" class="input-text" maxlength="60" placeholder="Income label (e.g. Tax Refund)" oninput="onRuleFormChange()">
-                            </div>
-                            <div class="rule-do-line">
-                                <label class="checkbox-row"><input type="checkbox" id="ruleDoReview" onchange="onRuleFormChange()"> Flag for review</label>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="rules-regex-preview" id="ruleEditorPreview"></div>
-                    <div class="rules-save-buttons">
-                        <button type="button" class="btn-modal-save" id="btnRuleSave" onclick="saveRuleFromForm()">Add rule</button>
-                        <button type="button" class="btn-modal-cancel" id="btnRuleCancel" onclick="resetRuleForm()" hidden>Cancel</button>
-                    </div>
+                    <div class="import-hint" id="importFolderNote"></div>
                 </div>
-                <div class="rules-toolbar">
-                    <div class="segmented-toggle" id="ruleFilterToggle">
-                        <button class="segmented-btn active" data-filter="all" onclick="setRuleFilter('all')">All</button>
-                        <button class="segmented-btn" data-filter="rename" onclick="setRuleFilter('rename')">Renames</button>
-                        <button class="segmented-btn" data-filter="envelope" onclick="setRuleFilter('envelope')">Envelopes</button>
-                        <button class="segmented-btn" data-filter="kind" onclick="setRuleFilter('kind')">Kinds</button>
-                        <button class="segmented-btn" data-filter="attention" onclick="setRuleFilter('attention')">Needs attention <span id="ruleAttentionCount"></span></button>
-                    </div>
-                    <input type="text" id="ruleSearch" class="input-text" placeholder="Search rules&hellip;" oninput="renderImportRules()">
-                </div>
-                <div class="table-responsive-container rules-table-wrap">
-                    <table class="txn-table">
-                        <thead>
-                            <tr>
-                                <th style="width: 44px; text-align: right;" title="Rules run from 1 down">#</th>
-                                <th>Rule</th>
-                                <th>Does</th>
-                                <th style="width: 56px; text-align: center;">On</th>
-                                <th style="width: 190px;">Order</th>
-                            </tr>
-                        </thead>
-                        <tbody id="rulesBody"></tbody>
-                    </table>
-                </div>
+                <div class="import-hint" style="margin-top: 10px;">This is saved for the budget you have open. Other budgets keep their own folders.</div>
             </div>
             <div class="modal-footer">
-                <div class="modal-footer-msg" id="rulesFooterMsg">Changes apply to future imports. Saving a rule offers to apply it to saved transactions too; "Re-run rules" re-checks everything.</div>
-                <button type="button" class="btn-modal-save" onclick="closeImportRulesModal()">Done</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Re-run rules -->
-    <div class="modal-overlay" id="reclassifyModalOverlay">
-        <div class="modal-container wide" role="dialog" aria-modal="true">
-            <div class="modal-header">
-                <div class="modal-title-wrap">
-                    <div class="modal-title">Re-run rules on saved transactions</div>
-                    <div class="modal-subtitle">Preview first. Nothing changes until you press Apply.</div>
-                </div>
-                <button class="modal-close-btn" onclick="closeReclassifyModal()" title="Close">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="checkbox-row" style="margin-bottom: 12px;">
-                    <input type="checkbox" id="reclassifyIncludeEdited" onchange="runReclassifyPreview()">
-                    <label for="reclassifyIncludeEdited">Also include rows I edited by hand (they are skipped by default)</label>
-                </div>
-                <div id="reclassifySummary" class="reclassify-summary">Checking&hellip;</div>
-                <div class="table-responsive-container rules-table-wrap">
-                    <table class="txn-table">
-                        <thead>
-                            <tr>
-                                <th style="width: 100px;">Date</th>
-                                <th>Payee</th>
-                                <th style="width: 100px; text-align: right;">Amount</th>
-                                <th>What would change</th>
-                                <th style="width: 220px;">Because of rule</th>
-                            </tr>
-                        </thead>
-                        <tbody id="reclassifyBody"></tbody>
-                    </table>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <div class="modal-footer-msg">A backup of the database is made every time the app upgrades it, not on each change.</div>
+                <button type="button" class="btn-modal-cancel" id="btnImportFolderDefault" onclick="useDefaultImportFolder()" style="margin-right: auto;">Use the built-in folder</button>
                 <div class="modal-actions">
-                    <button type="button" class="btn-modal-cancel" onclick="closeReclassifyModal()">Close</button>
-                    <button type="button" class="btn-modal-save" id="btnReclassifyApply" onclick="applyReclassify()" disabled>Apply changes</button>
+                    <button type="button" class="btn-modal-cancel" onclick="closeImportFolderModal()">Cancel</button>
+                    <button type="button" class="btn-modal-save" onclick="saveImportFolder()">Use this folder</button>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Import history -->
-    <div class="modal-overlay" id="historyModalOverlay" onclick="if (event.target === this) closeImportHistoryModal()">
-        <div class="modal-container" role="dialog" aria-modal="true" style="max-width: 760px;">
-            <div class="modal-header">
-                <div class="modal-title-wrap">
-                    <div class="modal-title">Import history</div>
-                    <div class="modal-subtitle">The 20 most recent saves</div>
-                </div>
-                <button class="modal-close-btn" onclick="closeImportHistoryModal()" title="Close">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="table-responsive-container">
-                    <table class="txn-table">
-                        <thead>
-                            <tr>
-                                <th>When</th>
-                                <th>Files</th>
-                                <th style="text-align: right;">New</th>
-                                <th style="text-align: right;">Already there</th>
-                                <th style="text-align: right;">Needs review</th>
-                            </tr>
-                        </thead>
-                        <tbody id="historyBody"></tbody>
-                    </table>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <div class="modal-footer-msg"></div>
-                <button type="button" class="btn-modal-save" onclick="closeImportHistoryModal()">Done</button>
-            </div>
-        </div>
-    </div>
 
 
     <!-- Automatic bills on a card -->

@@ -228,6 +228,7 @@ async function reloadTransactionData() {
     try {
         const res = await fetch('/api/transactions');
         const data = await res.json();
+        if (!res.ok || data.success === false) throw new Error(data.error || 'Server error');
         allTransactions = data.transactions || [];
         goLiveDate = data.go_live_date || null;
         configuredEnvelopesList = data.envelopes || [];
@@ -239,7 +240,7 @@ async function reloadTransactionData() {
         document.dispatchEvent(new CustomEvent('txnsrefreshed'));
     } catch (err) {
         console.error("Failed to load transactions:", err);
-        showToast("Failed to connect to backend", true);
+        showToast("Could not load transactions: " + (err && err.message ? err.message : err), true);
     }
 }
 
@@ -691,7 +692,8 @@ function updateIncomeVsSpendChart() {
 
     const themeCols = getThemeChartColors();
     const ctx = document.getElementById('chartIncomeSpend').getContext('2d');
-    if (chartIncomeSpendInstance) chartIncomeSpendInstance.destroy();
+    chartIncomeSpendInstance = null;
+    { const stale = Chart.getChart(ctx.canvas); if (stale) stale.destroy(); }
 
     chartIncomeSpendInstance = new Chart(ctx, {
         type: 'bar',
@@ -860,7 +862,8 @@ function updateCategorySpendChart() {
 
     const themeCols = getThemeChartColors();
     const ctx = document.getElementById('chartCategorySpend').getContext('2d');
-    if (chartCategorySpendInstance) chartCategorySpendInstance.destroy();
+    chartCategorySpendInstance = null;
+    { const stale = Chart.getChart(ctx.canvas); if (stale) stale.destroy(); }
 
     chartCategorySpendInstance = new Chart(ctx, {
         type: 'doughnut',
@@ -1117,12 +1120,14 @@ function updateSpendingOverTimeChart() {
     }
 
     const ctx = document.getElementById('chartTimeSpend').getContext('2d');
-    if (chartTimeSpendInstance) chartTimeSpendInstance.destroy();
+    chartTimeSpendInstance = null;
+    { const stale = Chart.getChart(ctx.canvas); if (stale) stale.destroy(); }
 
     chartTimeSpendInstance = new Chart(ctx, {
+        type: 'bar',
         data: {
             labels: sortedKeys.length > 0 ? sortedKeys : ['No Activity'],
-            datasets: datasets.length > 0 ? datasets : [{ label: 'Spend', data: [0], backgroundColor: '#3b82f6' }]
+            datasets: datasets.length > 0 ? datasets : [{ type: 'bar', label: 'Spend', data: [0], backgroundColor: '#3b82f6' }]
         },
         options: {
             responsive: true,
@@ -2136,8 +2141,9 @@ function openBulkModal(targetField) {
         return;
     }
 
-    document.getElementById('bulkModalCount').textContent = `${selectedTxnIds.size} transactions`;
+    document.getElementById('bulkModalCount').textContent = `${selectedTxnIds.size} transaction${selectedTxnIds.size === 1 ? '' : 's'}`;
 
+    // Nothing is ticked at first: tick what you want to change
     document.getElementById('bulkApplyPayee').checked = (targetField === 'payee');
     document.getElementById('bulkApplyEnvelope').checked = (targetField === 'envelope');
     document.getElementById('bulkApplyStatus').checked = (targetField === 'status');

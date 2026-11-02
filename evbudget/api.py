@@ -13,7 +13,7 @@ from email.policy import HTTP as HTTP_POLICY
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import VERSION, audit, billmatch, budget, cardbills, cards, import_engine, ledger, income, paths, recurrence, reclassify, rule_engine, rules, store
-from . import income_discovery, releases, updater, walkthrough
+from . import folder_picker, income_discovery, releases, updater, walkthrough
 from . import profiles as profiles_mod
 from . import envelopes as env_mod
 from .http_util import HttpError, Request, Response, Router
@@ -34,6 +34,8 @@ STATIC_TYPES = {
     ".png": "image/png",
     ".ico": "image/x-icon",
 }
+
+IMPORT_FOLDER_KEY = "import_folder"
 
 TRANSACTION_FIELDS = [
     "txn_id", "date", "name", "raw_name", "amount", "envelope", "check_num", "account_type", "source_file",
@@ -117,6 +119,7 @@ class App:
         self.boot_id = secrets.token_hex(6)
         self.port: Optional[int] = None
         self.updater = updater.Updater(paths.ROOT_DIR)
+        self.folder_picker = folder_picker.FolderPicker()
 
     @staticmethod
     def _open_only(value: Optional[str]) -> str:
@@ -130,7 +133,16 @@ class App:
 
     @property
     def input_dir(self) -> str:
-        return self._open_only(self._input_dir)
+        """The folder bank files are read from: the one chosen for this budget, or its own input folder."""
+        default = self._open_only(self._input_dir)
+        return self._custom_input_dir() or default
+
+    def _custom_input_dir(self) -> str:
+        conn = self.conn()
+        try:
+            return store.get_setting(conn, IMPORT_FOLDER_KEY).strip()
+        finally:
+            conn.close()
 
     @property
     def master_csv_path(self) -> str:
@@ -563,6 +575,7 @@ class App:
             result = reclassify.reclassify(
                 conn, txn_ids=data.get("txn_ids") or None,
                 include_edited=bool(data.get("include_edited")), apply=bool(data.get("apply")),
+                edited_ids=[str(i) for i in data.get("edited_ids") or []] or None,
             )
         finally:
             conn.close()
@@ -789,22 +802,144 @@ class App:
             conn.close()
 
     def _matching(self, conn: Any, rule: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Saved transactions a rule would act on, with what it would change."""
+        """Saved transactions a rule would act on, with what it would change.
+
+        Rename, envelope and review-flag actions are worked out directly. A kind action ("treat as a transfer")
+        runs this one rule through the real classifier, so direction, excluded kinds and income are handled the
+        way an import would handle them."""
         out = []
-        for r in conn.execute("SELECT txn_id, name, raw_name, amount, envelope, check_num, txn_kind, user_modified, needs_review FROM transactions"):
+        ctx = book = None
+        if rule.get("set_kind"):
+            ctx = rules.load_context(conn)
+            book = rule_engine.RuleBook([dict(rule, id=0, active=1, priority=0)])
+        for r in conn.execute("SELECT * FROM transactions"):
             hay = " ".join((r["raw_name"] or "").upper().split())
             name = r["name"] or ""
             if not rule_engine.RuleBook._applies(rule, (hay, name.upper()), float(r["amount"]), r["check_num"] or "", ""):
                 continue
             new_name = rules.rename_for(rule, hay, name) if rule.get("set_payee") and rule["filter_type"] == "text" else None
             new_env = rule.get("set_envelope") if r["txn_kind"] in ("expense", "refund") else None
+            kind_fields = None
+            if book is not None:
+                res = rule_engine.classify(ctx, book, raw_name=r["raw_name"] or name, payee=name, amount=float(r["amount"]),
+                                           date_iso=r["date"], check_num=r["check_num"] or "")
+                if res["txn_kind"] != r["txn_kind"] or bool(res["is_included"]) != bool(r["is_included"]):
+                    kind_fields = {
+                        "txn_kind": res["txn_kind"], "is_included": 1 if res["is_included"] else 0,
+                        "exclusion_reason": res["exclusion_reason"] or "", "income_label": res["income_label"],
+                        "income_source_id": res["income_source_id"], "person_id": res["person_id"],
+                        "income_subtype": res["income_subtype"],
+                    }
+                    if res["txn_kind"] in ("transfer", "cc_payment"):
+                        kind_fields["envelope"] = ""   # an excluded transaction belongs to no envelope
             out.append({
                 "txn_id": r["txn_id"], "name": name, "locked": bool(r["user_modified"]),
                 "after_name": new_name if new_name and new_name != name else None,
                 "envelope": r["envelope"] or "",
                 "after_envelope": new_env if new_env and new_env.lower() != (r["envelope"] or "").lower() else None,
                 "flag": bool(rule.get("set_needs_review")) and not r["needs_review"],
+                "kind_fields": kind_fields, "after_kind": kind_fields["txn_kind"] if kind_fields else None,
+                "date": r["date"], "raw_name": r["raw_name"], "amount": float(r["amount"]),
+                "before": {
+                    "name": name, "envelope": (r["envelope"] or "").strip(), "needs_review": int(r["needs_review"] or 0),
+                    "txn_kind": r["txn_kind"], "is_included": int(r["is_included"] or 0),
+                    "exclusion_reason": r["exclusion_reason"] or "", "income_label": r["income_label"],
+                    "income_source_id": r["income_source_id"], "person_id": r["person_id"], "income_subtype": r["income_subtype"],
+                },
             })
+        return out
+
+    @staticmethod
+    def _rule_change_records(rule: Dict[str, Any], hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """What one rule would change, in the same shape the full re-run uses, so one review screen can show either."""
+        out = []
+        for h in hits:
+            if not (h["after_name"] or h["after_envelope"] or h["flag"] or h["kind_fields"]):
+                continue
+            before, after = dict(h["before"]), dict(h["before"])
+            if h["after_name"]:
+                after["name"] = h["after_name"]
+            if h["after_envelope"]:
+                after["envelope"] = h["after_envelope"]
+            if h["flag"]:
+                after["needs_review"] = 1
+            after.update(h["kind_fields"] or {})
+            changed = [k for k in after if before[k] != after[k]]
+            if not changed:
+                continue
+            out.append({
+                "txn_id": h["txn_id"], "date": h["date"], "raw_name": h["raw_name"], "amount": h["amount"],
+                "before": before, "after": after, "changed_fields": changed, "rule": rule.get("name") or "",
+                "edited_by_hand": h["locked"],
+            })
+        out.sort(key=lambda c: (not c["edited_by_hand"], c["date"], c["txn_id"]))
+        return out
+
+    def _apply_rule_hits(self, conn: Any, hits: List[Dict[str, Any]], only_ids: Optional[set] = None) -> int:
+        """Write a rule's changes. Without only_ids, rows edited by hand are skipped; with it, exactly those rows are changed."""
+        now = datetime.now().isoformat()
+        n = 0
+        for h in hits:
+            if only_ids is None:
+                if h["locked"]:
+                    continue
+            elif h["txn_id"] not in only_ids:
+                continue
+            if not (h["after_name"] or h["after_envelope"] or h["flag"] or h["kind_fields"]):
+                continue
+            sets, params = ["updated_at = ?"], [now]  # type: List[str], List[Any]
+            for col, val in (h["kind_fields"] or {}).items():
+                sets.append(f"{col} = ?")
+                params.append(val)
+            if h["after_name"]:
+                sets.append("name = ?")
+                params.append(h["after_name"])
+            if h["after_envelope"]:
+                sets.append("envelope = ?")
+                params.append(h["after_envelope"])
+            if h["flag"]:
+                sets.append("needs_review = 1")
+            conn.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE txn_id = ?", params + [h["txn_id"]])
+            n += 1
+        return n
+
+    def rules_review(self, req: Request) -> Any:
+        """Everything one rule, or all rules, would change in the saved transactions. Writes nothing.
+        Rows you edited by hand are included and marked, so the review screen can offer them as choices."""
+        data = req.json()
+        scope = data.get("scope")
+        if scope == "all":
+            def work_all(c):
+                res = reclassify.reclassify(c, include_edited=True, apply=False, preview_limit=10 ** 9)
+                return {"scope": "all", "checked": res["checked"], "changes": res["changes"]}
+            return self._run(work_all)
+        if scope != "rule":
+            raise HttpError(400, "Choose one rule or all rules")
+        rule = self._rule_fields(data.get("rule") or {})
+
+        def work_rule(c):
+            hits = self._matching(c, rule)
+            return {"scope": "rule", "checked": len(hits), "changes": self._rule_change_records(rule, hits)}
+        return self._run(work_rule)
+
+    def rules_review_apply(self, req: Request) -> Any:
+        """Apply the changes the review screen listed, to exactly the rows that were ticked."""
+        self._need_json(req)
+        data = req.json()
+        ids = {str(i) for i in data.get("txn_ids") or []}
+        if not ids:
+            raise HttpError(400, "Nothing is selected")
+        scope = data.get("scope")
+        if scope == "all":
+            def work_all(c):
+                return {"success": True, "changed": reclassify.reclassify(c, txn_ids=sorted(ids), include_edited=True, apply=True)["changed_count"]}
+            out = self._run(work_all)
+        elif scope == "rule":
+            rule = self._rule_fields(data.get("rule") or {})
+            out = self._run(lambda c: {"success": True, "changed": self._apply_rule_hits(c, self._matching(c, rule), ids)})
+        else:
+            raise HttpError(400, "Choose one rule or all rules")
+        self.sync_csv()
         return out
 
     def rule_preview(self, req: Request) -> Any:
@@ -816,15 +951,15 @@ class App:
 
         def work(c):
             hits = self._matching(c, rule)
-            changes = [h for h in hits if h["after_name"] or h["after_envelope"] or h["flag"]]
+            changes = [h for h in hits if h["after_name"] or h["after_envelope"] or h["flag"] or h["kind_fields"]]
             seen, examples = set(), []
             for h in changes:
                 if h["locked"]:
                     continue
-                key = (h["name"], h["after_name"], h["after_envelope"])
+                key = (h["name"], h["after_name"], h["after_envelope"], h["after_kind"])
                 if key not in seen and len(examples) < 6:
                     seen.add(key)
-                    examples.append({k: h[k] for k in ("name", "after_name", "envelope", "after_envelope")})
+                    examples.append({k: h[k] for k in ("name", "after_name", "envelope", "after_envelope", "after_kind")})
             return {"count": len(hits), "would_change": len([h for h in changes if not h["locked"]]),
                     "locked": len([h for h in changes if h["locked"]]), "examples": examples}
         return self._run(work)
@@ -834,23 +969,7 @@ class App:
         rule = self._rule_fields(req.json())
 
         def work(c):
-            now = datetime.now().isoformat()
-            n = 0
-            for h in self._matching(c, rule):
-                if h["locked"] or not (h["after_name"] or h["after_envelope"] or h["flag"]):
-                    continue
-                sets, params = ["updated_at = ?"], [now]
-                if h["after_name"]:
-                    sets.append("name = ?")
-                    params.append(h["after_name"])
-                if h["after_envelope"]:
-                    sets.append("envelope = ?")
-                    params.append(h["after_envelope"])
-                if h["flag"]:
-                    sets.append("needs_review = 1")
-                c.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE txn_id = ?", params + [h["txn_id"]])
-                n += 1
-            return {"success": True, "changed": n}
+            return {"success": True, "changed": self._apply_rule_hits(c, self._matching(c, rule))}
         out = self._run(work)
         self.sync_csv()
         return out
@@ -878,7 +997,54 @@ class App:
                     counts[name] = counts.get(name, 0) + int(r[1])
         return counts
 
+    # ------------------------------------------------- where bank files are read from
+
+    def _folder_info(self) -> Dict[str, Any]:
+        default = self._open_only(self._input_dir)
+        custom = self._custom_input_dir()
+        path = custom or default
+        return {"path": path, "default": default, "is_default": not custom, "exists": os.path.isdir(path)}
+
+    def import_folder_get(self, req: Request) -> Any:
+        return self._folder_info()
+
+    def import_folder_set(self, req: Request) -> Any:
+        self._need_json(req)
+        raw = str(req.json().get("path") or "").strip().strip('"')
+        default = self._open_only(self._input_dir)
+        if raw:
+            chosen = os.path.abspath(os.path.expanduser(raw))
+            if not os.path.isdir(chosen):
+                raise HttpError(400, f"That folder doesn't exist: {chosen}")
+            if not os.access(chosen, os.R_OK):
+                raise HttpError(400, "EVBudget isn't allowed to read that folder.")
+            if os.path.normcase(os.path.realpath(chosen)) == os.path.normcase(os.path.realpath(default)):
+                chosen = ""   # same as the built-in folder: just use that
+        else:
+            chosen = ""
+        conn = self.conn()
+        try:
+            store.set_setting(conn, IMPORT_FOLDER_KEY, chosen)
+            conn.commit()
+        finally:
+            conn.close()
+        return dict(self._folder_info(), success=True)
+
+    def import_folder_browse(self, req: Request) -> Any:
+        self._need_json(req)
+        try:
+            self.folder_picker.start(self._folder_info()["path"])
+        except OSError as exc:
+            raise HttpError(400, f"Couldn't open a folder chooser: {exc}")
+        return {"success": True, "state": "waiting"}
+
+    def import_folder_browse_status(self, req: Request) -> Any:
+        return self.folder_picker.status()
+
     def import_scan(self, req: Request) -> Any:
+        folder = self._folder_info()
+        if not folder["exists"] and not folder["is_default"]:
+            raise HttpError(400, f"The import folder can't be found: {folder['path']}. Choose another folder.")
         conn = self.conn()
         try:
             counts = self._imported_counts(conn)
@@ -893,6 +1059,9 @@ class App:
     def import_upload(self, req: Request) -> Any:
         if "multipart/form-data" not in req.content_type:
             raise HttpError(400, "Expected a file upload")
+        folder = self._folder_info()
+        if not folder["exists"] and not folder["is_default"]:
+            raise HttpError(400, f"The import folder can't be found: {folder['path']}. Choose another folder.")
         saved = []
         for name, data in parse_multipart(req.content_type, req.raw):
             target = import_engine.save_upload(name, data, self.input_dir)
@@ -1626,8 +1795,14 @@ class App:
         r.add("POST", "/api/rules/delete", self.delete_rule)
         r.add("POST", "/api/rules/preview", self.rule_preview)
         r.add("POST", "/api/rules/apply", self.rule_apply)
+        r.add("POST", "/api/rules/review", self.rules_review)
+        r.add("POST", "/api/rules/review/apply", self.rules_review_apply)
         r.add("POST", "/api/rules/move", self.move_rule)
         r.add("POST", "/api/rules/learn", self.learn_rule)
+        r.add("GET", "/api/import/folder", self.import_folder_get)
+        r.add("POST", "/api/import/folder", self.import_folder_set)
+        r.add("POST", "/api/import/folder/browse", self.import_folder_browse)
+        r.add("GET", "/api/import/folder/browse", self.import_folder_browse_status)
         r.add("GET", "/api/import/scan", self.import_scan)
         r.add("POST", "/api/import/upload", self.import_upload)
         r.add("POST", "/api/import/inspect", self.import_inspect)

@@ -97,7 +97,7 @@ async function loadPayDiscovery() {
     document.getElementById('payDiscoverCard').hidden = payDiscoverList.length === 0;
     document.getElementById('payDiscoverBody').innerHTML = payDiscoverList.map((c, i) => `<tr>
         <td><div style="font-weight:500;">${escapeHtml(c.name)}</div><div style="font-size:11px;color:var(--text-dim);">Matches "${escapeHtml(c.match_phrase)}"</div></td>
-        <td>${payScheduleText(c.freq, c.interval)}${c.confidence === 'high' ? '' : ' <span class="kind-badge kind-review">Check</span>'}</td>
+        <td>${payScheduleText(c.freq, c.interval)}${c.confidence === 'high' ? '' : ' <span class="kind-badge kind-review" title="Less certain: fewer deposits or a less even schedule than a clear paycheck. Check it before making it a pay source.">Check</span>'}</td>
         <td class="amount-cell amount-income">${formatCurrency(c.typical_amount)}</td>
         <td>${c.deposits} (last ${formatDisplayDate(c.last_date)})</td>
         <td>${c.next_date ? formatDisplayDate(c.next_date) : '&mdash;'}</td>

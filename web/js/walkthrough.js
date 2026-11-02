@@ -101,10 +101,10 @@ const WT_STEPS = [
         id: 'templates',
         tab: 'budget',
         title: 'Decide how each paycheck is split',
-        body: `Under <strong>Fill templates</strong>, click <strong>Generate</strong> for each pay source. It splits
-               a typical paycheck across your envelopes based on their monthly amounts. Adjust it, then <strong>Save</strong>.
-               Each new paycheck starts with this split.`,
-        target: () => { const w = document.getElementById('templatesWrap'); return w ? w.closest('section') : null; },
+        body: `Under <strong>Fill templates</strong>, click <strong>Generate all from budget</strong>. It splits a typical
+               paycheck across your envelopes based on their monthly amounts, for every pay source. Adjust any amount you like;
+               changes save automatically. Each new paycheck starts with this split.`,
+        target: '#btnGenerateAll',
         done: s => s.income_sources > 0 && s.sources_without_template === 0,
         doneText: () => 'Every pay source has a split',
         notDoneText: s => s.income_sources === 0 ? 'Add a pay source first (step 3)' : `${wtPlural(s.sources_without_template, 'pay source')} without a split`,

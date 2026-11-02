@@ -3,7 +3,7 @@
 let budgetData = null;          // {envelopes, suggestions, summary, unallocated_id}
 let budgetTemplates = [];       // [{income_source_id, ..., lines}]
 let templateDraft = {};         // income_source_id -> lines being edited
-let templateDirty = {};
+let templateSaveTimers = {};    // income_source_id -> pending autosave
 let setupStatus = null;
 let billsEnvelopeId = null;
 let budgetLoaded = false;
@@ -32,7 +32,8 @@ async function loadBudget() {
         budgetTemplates = t.templates;
         setupStatus = s;
         templateDraft = {};
-        templateDirty = {};
+        flushTemplateSaves();
+        templateSaveTimers = {};
         budgetTemplates.forEach(x => { templateDraft[x.income_source_id] = x.lines.map(l => Object.assign({}, l)); });
         budgetLoaded = true;
         renderBudgetKpis();
@@ -81,11 +82,33 @@ function renderGoLive() {
 // ---------------------------------------------------------------------
 // Envelope table
 // ---------------------------------------------------------------------
+// Hover text for the high / medium / low pill: what it means and how many months or payments it rests on
+function confidencePill(level, tip) {
+    return `<span class="conf conf-${level}" title="${escapeHtml(tip)}" aria-label="${escapeHtml(level + ' confidence. ' + tip)}">${level}</span>`;
+}
+
+function suggestionConfidenceTip(s, kind) {
+    const n = s.months || 0;
+    const months = `${n} complete month${n === 1 ? '' : 's'}`;
+    if (kind === 'bill') {
+        return {
+            high: `High confidence: based on a full 12 months of history, so the yearly total behind this monthly amount is solid.`,
+            medium: `Medium confidence: based on ${months} of history (6 to 11). The yearly total is estimated from that, so it may be off if the bill is seasonal.`,
+            low: `Low confidence: only ${months} of history (under 6). Treat this as a rough guess.`
+        }[s.confidence];
+    }
+    return {
+        high: `High confidence: based on ${months} of spending (6 or more), so the average is steady.`,
+        medium: `Medium confidence: based on ${months} of spending (3 to 5). More history would make this more reliable.`,
+        low: `Low confidence: only ${months} of spending (under 3). Treat this as a rough guess.`
+    }[s.confidence];
+}
+
 function suggestionCell(e) {
     const s = budgetData.suggestions[String(e.id)];
     if (s && s.basis === 'goal') return goalProgressCell(e, s);
     if (!s || s.basis === 'none') return '<span class="import-muted">You choose the monthly amount</span>';
-    const conf = s.confidence ? `<span class="conf conf-${s.confidence}">${s.confidence}</span>` : '';
+    const conf = s.confidence ? confidencePill(s.confidence, suggestionConfidenceTip(s, e.kind)) : '';
     if (s.basis === 'bills') {
         return `Bills add up to <strong>${money(s.suggested)}</strong> a month ${s.actual_12mo_avg !== undefined ? `<div class="import-file-sub">Actually paid ${money(s.actual_12mo_avg)} a month over the last year</div>` : ''}`;
     }
@@ -325,9 +348,11 @@ function templateTotal(sid) {
 function renderTemplates() {
     const wrap = document.getElementById('templatesWrap');
     if (budgetTemplates.length === 0) {
-        wrap.innerHTML = '<div class="import-more">Add a pay source on the Income tab first.</div>';
+        wrap.innerHTML = '<div class="import-more">Add a pay source first (Spending &amp; Income, under Income).</div>';
+        document.getElementById('btnGenerateAll').disabled = true;
         return;
     }
+    document.getElementById('btnGenerateAll').disabled = false;
     const envs = budgetData.envelopes.filter(e => e.active);
     wrap.innerHTML = budgetTemplates.map(t => {
         const sid = t.income_source_id;
@@ -344,8 +369,8 @@ function renderTemplates() {
                 <div><div class="table-title">${escapeHtml(t.person_name || '')} &middot; ${escapeHtml(t.source_name)}</div>
                 <div class="table-subtitle">${t.typical ? `Typical paycheck ${money(t.typical)}, ${Math.round(t.periods_per_year)} a year` : 'No paychecks yet to base this on'}</div></div>
                 <div class="table-header-actions">
+                    <span class="template-saved" id="tpl-saved-${sid}" aria-live="polite"></span>
                     <button type="button" class="btn-refresh" onclick="templateGenerate(${sid})">Generate from budget</button>
-                    <button type="button" class="btn-modal-save" onclick="templateSave(${sid})" ${templateDirty[sid] || !t.saved ? '' : 'disabled'}>Save template</button>
                 </div>
             </div>
             <table class="txn-table income-table template-table"><thead><tr><th>Envelope</th><th style="width:140px;">Per paycheck ($)</th><th style="width:50px;"></th></tr></thead>
@@ -370,48 +395,87 @@ function updateTemplateTotal(sid) {
         (diff >= 0 ? `<span class="tpl-ok">${money(diff)} stays in Unallocated</span>` : `<span class="tpl-short">Short by ${money(-diff)}</span>`);
 }
 
-function markTemplateDirty(sid) {
-    templateDirty[sid] = true;
-    const btn = document.querySelector(`#tpl-${sid} .btn-modal-save`);
-    if (btn) btn.disabled = false;
+// A template only says how a paycheck is split when it arrives; it never changes a record, so there is no Save button.
+// Every change is saved on its own: typing waits for a short pause, everything else saves right away.
+function templateChanged(sid, immediately) {
     updateTemplateTotal(sid);
+    const label = document.getElementById('tpl-saved-' + sid);
+    if (label) label.textContent = 'Saving\u2026';
+    clearTimeout(templateSaveTimers[sid]);
+    if (immediately) { templateSave(sid); return; }
+    templateSaveTimers[sid] = setTimeout(() => templateSave(sid), 600);
 }
 
-function templateSetAmount(sid, i, v) { templateDraft[sid][i].amount = v === '' ? 0 : parseFloat(v); markTemplateDirty(sid); }
-function templateSetEnvelope(sid, i, id) { templateDraft[sid][i].envelope_id = id; markTemplateDirty(sid); renderTemplates(); }
-function templateRemoveLine(sid, i) { templateDraft[sid].splice(i, 1); markTemplateDirty(sid); renderTemplates(); }
+// Save anything still waiting for its pause (before the page reloads its data or the tab changes)
+function flushTemplateSaves() {
+    Object.keys(templateSaveTimers).forEach(k => {
+        if (templateSaveTimers[k]) { clearTimeout(templateSaveTimers[k]); templateSaveTimers[k] = null; templateSave(parseInt(k, 10)); }
+    });
+}
+
+document.addEventListener('tabchange', (e) => { if (e.detail.tab !== 'budget') flushTemplateSaves(); });
+
+function templateSetAmount(sid, i, v) { templateDraft[sid][i].amount = v === '' ? 0 : parseFloat(v); templateChanged(sid, false); }
+function templateSetEnvelope(sid, i, id) { templateDraft[sid][i].envelope_id = id; renderTemplates(); templateChanged(sid, true); }
+function templateRemoveLine(sid, i) { templateDraft[sid].splice(i, 1); renderTemplates(); templateChanged(sid, true); }
 
 function templateAddLine(sid) {
     const used = new Set(templateDraft[sid].map(l => l.envelope_id));
     const free = budgetData.envelopes.find(e => e.active && !used.has(e.id));
     if (!free) return;
     templateDraft[sid].push({ envelope_id: free.id, amount: 0 });
-    markTemplateDirty(sid);
     renderTemplates();
+    templateChanged(sid, true);
+}
+
+// Rebuild one pay source's template from the monthly budgets and save it. Returns the number of lines, or 0 if
+// there was nothing to build from.
+async function templateRebuild(sid) {
+    const g = await apiPost('/api/templates/generate', { income_source_id: sid });
+    if (g.lines.length === 0) return 0;
+    templateDraft[sid] = g.lines;
+    await templateSave(sid, true);
+    return g.lines.length;
 }
 
 async function templateGenerate(sid) {
     try {
-        const g = await apiPost('/api/templates/generate', { income_source_id: sid });
-        if (g.lines.length === 0) { showToast('Set some envelope budgets first, then generate.', true); return; }
-        if (templateDraft[sid].length && !confirm('Replace the lines you have now with suggested ones? Nothing is saved until you press Save.')) return;
-        templateDraft[sid] = g.lines;
-        markTemplateDirty(sid);
-        renderTemplates();
-        showToast(`Suggested ${money(g.total)} per paycheck. Adjust, then save.`);
+        const t = budgetTemplates.find(x => x.income_source_id === sid);
+        const n = await templateRebuild(sid);
+        if (!n) { showToast('Set some envelope budgets first, then generate.', true); return; }
+        showToast(`Template rebuilt from the budget: ${money(templateTotal(sid))} per paycheck${t && t.person_name ? ' for ' + t.person_name : ''}.`);
     } catch (err) { showToast(err.message, true); }
 }
 
-async function templateSave(sid) {
+// Every pay source, for every person
+async function templateGenerateAll() {
+    const btn = document.getElementById('btnGenerateAll');
+    btn.disabled = true;
+    let done = 0, empty = 0, failed = '';
+    for (const t of budgetTemplates) {
+        try { (await templateRebuild(t.income_source_id)) ? done++ : empty++; } catch (err) { failed = err.message; }
+    }
+    btn.disabled = budgetTemplates.length === 0;
+    if (failed) showToast('Some templates could not be rebuilt: ' + failed, true);
+    else if (!done) showToast('Set some envelope budgets first, then generate.', true);
+    else showToast(`Rebuilt ${done} template${done === 1 ? '' : 's'} from the budget${empty ? ` (${empty} skipped: nothing to build from)` : ''}.`);
+}
+
+async function templateSave(sid, rerender) {
+    templateSaveTimers[sid] = null;
     try {
         await apiPost('/api/templates/save', { income_source_id: sid, lines: templateDraft[sid] });
         const t = budgetTemplates.find(x => x.income_source_id === sid);
         t.saved = true;
         t.lines = templateDraft[sid].map(l => Object.assign({}, l));
-        templateDirty[sid] = false;
-        renderTemplates();
-        showToast('Template saved.');
-    } catch (err) { showToast(err.message, true); }
+        if (rerender) renderTemplates();
+        const label = document.getElementById('tpl-saved-' + sid);
+        if (label) label.textContent = 'Saved';
+    } catch (err) {
+        const label = document.getElementById('tpl-saved-' + sid);
+        if (label) label.textContent = '';
+        showToast('Template not saved: ' + err.message, true);
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -470,7 +534,9 @@ async function loadDiscovery() {
     const card = document.getElementById('discoverCard');
     card.hidden = discoverList.length === 0;
     document.getElementById('discoverBody').innerHTML = discoverList.map((c, i) => `<tr>
-        <td><div style="font-weight:500;">${escapeHtml(c.name)}</div><div class="import-file-sub">${c.payments} payments, last ${formatDisplayDate(c.last_date)} <span class="conf conf-${c.confidence}">${c.confidence}</span></div></td>
+        <td><div style="font-weight:500;">${escapeHtml(c.name)}</div><div class="import-file-sub">${c.payments} payments, last ${formatDisplayDate(c.last_date)} ${confidencePill(c.confidence, c.confidence === 'high'
+            ? `High confidence: paid on a steady schedule for a steady amount, ${c.payments} times so far.`
+            : `Medium confidence: it looks regular, but with only ${c.payments} payments or some variation in timing or amount. Check it before adding.`)}</div></td>
         <td>${escapeHtml(c.envelope)}</td><td>${escapeHtml(billScheduleText(c))}</td>
         <td style="text-align:right;">${money(c.amount)}</td>
         <td>${c.next_due ? formatDisplayDate(c.next_due) : '—'}</td>

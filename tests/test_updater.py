@@ -45,7 +45,7 @@ class UpdaterTests(unittest.TestCase):
         write(os.path.join(self.dev, "app.txt"), "one")
         self.publish("first")
         git(self.tmp, "clone", "-q", self.origin, self.app)
-        self.up = updater.Updater(self.app)
+        self.up = updater.Updater(self.app, running_version="1.0")
 
     def tearDown(self):
         def unlock(func, path, _):

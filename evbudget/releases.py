@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 import urllib.parse
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import VERSION, paths, store
 
@@ -27,36 +27,69 @@ def current_version() -> str:
     return f"{VERSION:.1f}"
 
 
+NOTE_TYPES = ("new", "improved", "fixed")
+NEVER_SHOWN_LIMIT = 3   # a budget that has never been shown notes gets the latest few, not the whole history
+
+
+def version_key(version: Any) -> Tuple[int, ...]:
+    """"3.10" sorts after "3.9". Anything that isn't dotted numbers sorts before every real version."""
+    try:
+        return tuple(int(x) for x in str(version).split("."))
+    except ValueError:
+        return ()
+
+
+def parse(data: Any) -> List[Dict[str, Any]]:
+    """Release notes as the page uses them, newest first. A note is a sentence, or {"type": new|improved|fixed, "text": ...}.
+    Anything malformed is skipped rather than breaking the dialog."""
+    out = []
+    for r in data if isinstance(data, list) else []:
+        if not (isinstance(r, dict) and isinstance(r.get("version"), str) and isinstance(r.get("notes"), list)):
+            continue
+        notes = []
+        for n in r["notes"]:
+            if isinstance(n, dict) and n.get("text"):
+                kind = n.get("type") if n.get("type") in NOTE_TYPES else ""
+                notes.append({"type": kind, "text": str(n["text"])})
+            elif isinstance(n, str) and n.strip():
+                notes.append({"type": "", "text": n})
+        out.append({"version": r["version"], "date": str(r.get("date") or ""), "title": str(r.get("title") or ""), "notes": notes})
+    out.sort(key=lambda r: version_key(r["version"]), reverse=True)
+    return out
+
+
 def load() -> List[Dict[str, Any]]:
     """The release list, newest first. A missing or broken file gives an empty list rather than an error."""
     try:
         with open(RELEASES_PATH, encoding="utf-8") as f:
-            data = json.load(f)
+            return parse(json.load(f))
     except (OSError, ValueError):
         return []
-    out = []
-    for r in data if isinstance(data, list) else []:
-        if isinstance(r, dict) and isinstance(r.get("version"), str) and isinstance(r.get("notes"), list):
-            out.append({
-                "version": r["version"], "date": str(r.get("date") or ""), "title": str(r.get("title") or ""),
-                "notes": [str(n) for n in r["notes"]],
-            })
-    return out
+
+
+def shipped() -> List[Dict[str, Any]]:
+    """Releases up to the running version, so notes written ahead of a version bump never show early."""
+    return [r for r in load() if version_key(r["version"]) <= version_key(current_version())]
+
+
+def newer_than(releases: List[Dict[str, Any]], version: str) -> List[Dict[str, Any]]:
+    """Every release after the given version, newest first: 3.4 to 3.6 gives 3.6 and 3.5."""
+    floor = version_key(version)
+    return [r for r in releases if version_key(r["version"]) > floor]
 
 
 def unseen(releases: List[Dict[str, Any]], last_seen: str) -> List[Dict[str, Any]]:
-    """Releases newer than the last one shown. A budget that has never seen one, or whose
-    last-seen release is no longer in the list, gets just the latest, not the whole history."""
-    ids = [r["version"] for r in releases]
-    if last_seen in ids:
-        return releases[:ids.index(last_seen)]
-    return releases[:1]
+    """What this budget hasn't been shown yet: every release after the last one it saw, even a version
+    that has no entry of its own. A budget that has never been shown any gets the latest few."""
+    if last_seen and version_key(last_seen):
+        return newer_than(releases, last_seen)
+    return releases[:NEVER_SHOWN_LIMIT]
 
 
 def payload(conn: Any, brand_new: bool) -> Dict[str, Any]:
     """Everything the page needs. A brand-new empty budget is about to meet the setup walkthrough,
     so it is kept up to date silently instead of opening with a popup about changes it never saw."""
-    releases = load()
+    releases = shipped()
     last = store.get_setting(conn, SEEN_KEY)
     if brand_new and releases:
         if last != releases[0]["version"]:
@@ -65,7 +98,7 @@ def payload(conn: Any, brand_new: bool) -> Dict[str, Any]:
         new = []
     else:
         new = unseen(releases, last)
-    return {"current": current_version(), "releases": releases, "unseen": new, "last_seen": last or None}
+    return {"current": current_version(), "releases": releases, "unseen": new, "from_version": last or None, "last_seen": last or None}
 
 
 def mark_seen(conn: Any, version: str) -> None:

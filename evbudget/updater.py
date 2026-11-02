@@ -13,6 +13,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import releases
+
 CHECK_TIMEOUT = 20      # seconds for a fetch
 PULL_TIMEOUT = 120
 PIP_TIMEOUT = 240
@@ -49,22 +51,22 @@ def _first_line(text: str) -> str:
     return next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
 
 
-def _top_release(text: str) -> Dict[str, str]:
+def _release_notes(text: str, running: str) -> List[Dict[str, Any]]:
+    """The releases in the update's notes file that are newer than the version now running, newest first."""
     try:
-        data = json.loads(text)
-        top = data[0]
-        return {"version": str(top.get("version") or ""), "title": str(top.get("title") or "")}
-    except (ValueError, IndexError, TypeError, AttributeError):
-        return {"version": "", "title": ""}
+        return releases.newer_than(releases.parse(json.loads(text)), running)
+    except (ValueError, TypeError):
+        return []
 
 
 class Updater:
-    def __init__(self, repo_dir: str, remote: str = "origin", branch: str = "main") -> None:
+    def __init__(self, repo_dir: str, remote: str = "origin", branch: str = "main", running_version: Optional[str] = None) -> None:
         self.repo, self.remote, self.branch = repo_dir, remote, branch
+        self.running_version = running_version
         self.restart_needed = False
         self._lock = threading.Lock()
         self._checking = False
-        self._state: Dict[str, Any] = {"state": "unknown", "message": "", "behind": 0, "latest_version": "", "latest_title": "", "checked_at": None}
+        self._state: Dict[str, Any] = {"state": "unknown", "message": "", "behind": 0, "latest_version": "", "latest_title": "", "changes": [], "checked_at": None}
 
     # ------------------------------------------------------------------ status
 
@@ -77,7 +79,7 @@ class Updater:
 
     def _set(self, state: str, message: str = "", **extra: Any) -> Dict[str, Any]:
         self._state = {"state": state, "message": message, "behind": 0, "latest_version": "", "latest_title": "",
-                       "checked_at": time.time(), **extra}
+                       "changes": [], "checked_at": time.time(), **extra}
         return self._state
 
     # ------------------------------------------------------------------ checking
@@ -101,8 +103,9 @@ class Updater:
         if ahead > 0:
             return self._set("unavailable", "This copy has changes of its own that aren't on the server, so it can't update automatically.")
         _, text, _ = run_git(self.repo, "show", f"{ref}:{RELEASES_FILE}")
-        latest = _top_release(text)
-        return self._set("available", "An update is ready.", behind=behind, latest_version=latest["version"], latest_title=latest["title"])
+        changes = _release_notes(text, self.running_version or releases.current_version())
+        top = changes[0] if changes else {"version": "", "title": ""}
+        return self._set("available", "An update is ready.", behind=behind, latest_version=top["version"], latest_title=top["title"], changes=changes)
 
     def check(self) -> Dict[str, Any]:
         with self._lock:
@@ -152,7 +155,8 @@ class Updater:
             self.restart_needed = True
             try:
                 with open(os.path.join(self.repo, RELEASES_FILE), encoding="utf-8") as f:
-                    latest = _top_release(f.read())
+                    got = _release_notes(f.read(), self.running_version or releases.current_version())
+                latest = got[0] if got else {"version": "", "title": ""}
             except OSError:
                 latest = {"version": state.get("latest_version", ""), "title": state.get("latest_title", "")}
             self._set("current", "Updated.")

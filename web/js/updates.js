@@ -45,9 +45,11 @@ function openUpdateDialog() {
     const st = updState || {};
     if (st.state === 'restart') { updShowRestart(); return; }
     const version = st.latest_version ? `Version <strong>${escapeHtml(st.latest_version)}</strong>` : 'A new version';
-    const title = st.latest_title ? `<p><em>${escapeHtml(st.latest_title)}</em></p>` : '';
+    const changes = (st.changes && st.changes.length)
+        ? `<p>Here is what's in it:</p><div class="rel-scroll">${relEntriesHtml(st.changes, false)}</div>`
+        : (st.latest_title ? `<p><em>${escapeHtml(st.latest_title)}</em></p>` : '');
     updSet('Update available',
-        `<p>${version} is ready to install.</p>${title}
+        `<p>${version} is ready to install.</p>${changes}
          <p class="import-hint">Your budgets and data aren't touched. EVBudget will restart to finish, and this window reloads by itself.</p>`,
         `<button type="button" class="btn-modal-cancel" onclick="closeUpdateDialog()">Later</button>
          <button type="button" class="btn-modal-save" onclick="applyUpdate()">Update now</button>`);

@@ -33,19 +33,10 @@ def _new_view(res: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def reclassify(
-    conn: Any,
-    txn_ids: Optional[List[str]] = None,
-    include_edited: bool = False,
-    apply: bool = False,
-    preview_limit: int = 200,
-) -> Dict[str, Any]:
-    """Re-run the rules over transactions.
+def _plan(conn: Any, selected: Optional[set], include_edited: bool, edited_ids: Optional[set] = None) -> Any:
+    """What the rules would change: (list of changes, number of rows checked). Writes nothing.
 
-    By default rows edited by hand (user_modified = 1) are left alone. With
-    apply=False nothing is written; the result lists what would change.
-    """
-    selected = set(txn_ids) if txn_ids else None
+    Hand-edited rows are left out unless include_edited is set or their id is in edited_ids."""
     ctx = rules.load_context(conn)
     ctx.history = income.PaycheckHistory()  # rebuilt in date order below
 
@@ -53,7 +44,8 @@ def reclassify(
     changes: List[Dict[str, Any]] = []
     checked = 0
     for row in rows:
-        in_scope = (selected is None or row["txn_id"] in selected) and (include_edited or not row["user_modified"])
+        edit_ok = include_edited or not row["user_modified"] or (edited_ids is not None and row["txn_id"] in edited_ids)
+        in_scope = (selected is None or row["txn_id"] in selected) and edit_ok
         if not in_scope:
             if row["txn_kind"] == "paycheck" and row["income_subtype"] == "regular" and row["is_included"] and row["income_source_id"]:
                 ctx.history.add(int(row["income_source_id"]), row["date"], float(row["amount"]))
@@ -71,7 +63,42 @@ def reclassify(
                 "txn_id": row["txn_id"], "date": row["date"], "raw_name": row["raw_name"], "amount": float(row["amount"]),
                 "before": before, "after": after, "changed_fields": changed,
                 "rule": res.get("match_detail") or after["match_source"],
+                "edited_by_hand": bool(row["user_modified"]),
             })
+    return changes, checked
+
+
+def reclassify(
+    conn: Any,
+    txn_ids: Optional[List[str]] = None,
+    include_edited: bool = False,
+    apply: bool = False,
+    preview_limit: int = 200,
+    edited_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Re-run the rules over transactions.
+
+    By default rows edited by hand (user_modified = 1) are left alone. With
+    apply=False nothing is written; the result lists what would change.
+
+    edited_ids: apply the rules to just these hand-edited rows (on top of the rows that were never edited), so
+    the caller can choose which hand edits to overwrite. include_edited means every hand-edited row.
+
+    The result also says how many hand-edited rows are involved: `edited_changed` for those in this run, and
+    `edited_pending` (how many more would change if they were included) for those left out, so they can be
+    previewed before deciding.
+    """
+    selected = set(txn_ids) if txn_ids else None
+    picked = set(edited_ids) if edited_ids else None
+    changes, checked = _plan(conn, selected, include_edited, picked)
+    edited_changed = sum(1 for c in changes if c["edited_by_hand"])
+    if include_edited:
+        edited_pending = 0
+    else:
+        # Hand-edited rows left out of this run: count the ones that would change, as if they were included.
+        done = {c["txn_id"] for c in changes}
+        edited_pending = sum(1 for c in _plan(conn, selected, True)[0] if c["edited_by_hand"] and c["txn_id"] not in done)
+    changes.sort(key=lambda c: not c["edited_by_hand"])   # hand-edited rows first, so a long list can't hide them
 
     if apply and changes:
         now = datetime.now().isoformat()
@@ -95,5 +122,8 @@ def reclassify(
 
     return {
         "success": True, "applied": bool(apply), "checked": checked, "changed_count": len(changes),
-        "changes": changes[:preview_limit], "truncated": len(changes) > preview_limit,
+        # Every hand-edited row is listed (they are chosen one by one); only the ordinary rows are cut to the limit
+        "changes": [c for c in changes if c["edited_by_hand"]] + [c for c in changes if not c["edited_by_hand"]][:preview_limit],
+        "truncated": len([c for c in changes if not c["edited_by_hand"]]) > preview_limit,
+        "edited_changed": edited_changed, "edited_pending": edited_pending,
     }

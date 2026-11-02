@@ -170,6 +170,13 @@ body {
 /* ---------------------------------------------------------------------
    Header Navigation Bar
    --------------------------------------------------------------------- */
+/* The header and the tab bar share one pinned wrapper, so the tabs never scroll out of reach */
+.app-top {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+}
+
 header.app-header {
     background: var(--bg-header);
     border-bottom: 1px solid var(--border-color);
@@ -177,9 +184,6 @@ header.app-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    position: sticky;
-    top: 0;
-    z-index: 50;
     backdrop-filter: blur(8px);
 }
 
@@ -2755,6 +2759,7 @@ footer.app-footer {
     margin-left: 4px;
 }
 
+.conf[title] { cursor: help; }
 .conf-high { background: rgba(16, 185, 129, 0.15); color: var(--accent-green); }
 .conf-medium { background: rgba(245, 158, 11, 0.16); color: var(--accent-amber); }
 .conf-low { background: rgba(239, 68, 68, 0.14); color: var(--accent-red); }
@@ -4074,3 +4079,265 @@ button.kind-link:focus-visible {
     font-size: 13.5px;
     font-weight: 600;
 }
+
+/* "Saved" note on each fill template */
+.template-saved {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-right: 4px;
+}
+
+/* Re-run rules: hand-edited rows are marked, and the summary explains what including them does */
+.reclassify-edited td {
+    background: color-mix(in srgb, var(--accent-amber) 9%, transparent);
+}
+
+.reclassify-warn {
+    display: block;
+    margin-top: 6px;
+    color: var(--accent-amber);
+}
+
+.reclassify-note {
+    display: block;
+    margin-top: 6px;
+    color: var(--text-muted);
+}
+
+.reclassify-pickbar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin: 4px 0 10px;
+}
+
+.import-folder-label {
+    word-break: break-all;
+}
+
+
+/* ---------------------------------------------------------------------
+   Import tab sections, the Rules page, and the review screen
+   --------------------------------------------------------------------- */
+#importSubImport,
+#importSubRules,
+#importSubHistory,
+#rulesBrowse {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+}
+
+#importSubImport[hidden],
+#importSubRules[hidden],
+#importSubHistory[hidden],
+#rulesBrowse[hidden] {
+    display: none;
+}
+
+.rules-intro {
+    max-width: 1100px;
+    margin: 0;
+}
+
+/* The list takes the room; the editor stays in view beside it while you scroll the rules */
+.rules-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.6fr) minmax(380px, 1fr);
+    gap: 20px;
+    align-items: start;
+}
+
+.rules-editor-card {
+    position: sticky;
+    top: calc(var(--app-top-h, 130px) + 16px);
+    max-height: calc(100vh - var(--app-top-h, 130px) - 32px);
+    overflow-y: auto;
+}
+
+.rules-editor-card .rule-form {
+    border: none;
+    padding: 0;
+    margin: 0;
+    background: none;
+}
+
+/* The editor is a narrow column: stack what used to sit in one row */
+.rules-editor-card .rule-form-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+}
+
+.rules-editor-card .rule-form-row > label {
+    padding-top: 0;
+}
+
+.rules-editor-card .rule-form-fields {
+    grid-template-columns: 1fr 1fr;
+}
+
+.rules-editor-card .rule-form-fields > :first-child {
+    grid-column: 1 / -1;
+}
+
+.rules-editor-card .rule-do-line {
+    grid-template-columns: 150px 1fr;
+}
+
+.rules-editor-card .rule-do-line > :nth-child(3) {
+    grid-column: 1 / -1;
+}
+
+.rules-editor-card .rules-save-buttons {
+    flex-wrap: wrap;
+}
+
+.rules-list-card .rules-toolbar {
+    margin-bottom: 0;
+}
+
+.rules-list-card .rules-toolbar .input-text {
+    flex: 1 1 160px;
+    max-width: 260px;
+}
+
+@media (max-width: 1100px) {
+    .rules-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .rules-editor-card {
+        position: static;
+        max-height: none;
+        order: -1;
+    }
+}
+
+/* Review: what would change, with a tick box on every row */
+.rules-review {
+    gap: 12px;
+}
+
+.review-bar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.review-edited td {
+    background: color-mix(in srgb, var(--accent-amber) 9%, transparent);
+}
+
+.review-more {
+    text-align: center;
+}
+
+.review-more[hidden] {
+    display: none;
+}
+
+/* The Apply bar stays at the bottom of the window however long the list is */
+.review-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    margin: 0 -20px -20px;
+    padding: 12px 20px;
+    background: var(--bg-card);
+    border-top: 1px solid var(--border-color);
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+
+.review-warn {
+    margin-right: auto;
+    color: var(--accent-amber);
+    font-size: 13px;
+}
+
+/* Once files are listed, the drop box is just a strip */
+.dropzone-compact {
+    padding: 9px 16px;
+}
+
+.dropzone-compact .dropzone-title {
+    font-size: 13.5px;
+}
+
+.dropzone-compact .dropzone-sub {
+    display: none;
+}
+
+/* Tighter rows on the Rules page, and no double gap under the view toggles (the panel already spaces its children) */
+.view-toggle-bar {
+    margin: 0;
+}
+
+.rules-table .btn-env-icon {
+    width: 26px;
+    height: 26px;
+}
+
+.rules-table td:nth-child(3) {
+    min-width: 170px;
+}
+
+.rules-table td:last-child {
+    white-space: nowrap;
+}
+
+.rules-table td:last-child > * {
+    margin-right: 2px;
+}
+
+
+/* What's new: version sections, note tags, collapsible older versions */
+.rel-tag {
+    display: inline-block;
+    margin-right: 8px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    vertical-align: 1px;
+    color: #fff;
+}
+
+.rel-tag-new { background: var(--accent-green, #10b981); }
+.rel-tag-improved { background: var(--accent-blue, #3b82f6); }
+.rel-tag-fixed { background: var(--accent-amber, #f59e0b); color: #1b1300; }
+
+details.rel-entry > summary {
+    cursor: pointer;
+    list-style: none;
+}
+
+details.rel-entry > summary::-webkit-details-marker { display: none; }
+
+details.rel-entry > summary .rel-name::after {
+    content: ' ▾';
+    color: var(--text-dim);
+    font-weight: 400;
+}
+
+details.rel-entry[open] > summary .rel-name::after { content: ' ▴'; }
+
+details.rel-entry > summary .rel-name { margin-bottom: 4px; }
+
+.rel-scroll {
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 12px 14px;
+    margin: 8px 0 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.rel-scroll .rel-entry:last-child { margin-bottom: 0; }

@@ -237,12 +237,159 @@ class ReclassifyTests(TempAppCase):
         self.assertEqual(res["changed_count"], 1)
         self.assertEqual(self.get_txn(edited)["envelope"], "Subscriptions")
 
+    def test_preview_counts_hand_edited_rows_that_are_left_out(self):
+        auto = self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Shopping", match_source="Default Fallback")
+        self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Restaurant", user_modified=1)
+        res = self.call(self.app.reclassify_transactions, {"apply": False})
+        self.assertEqual((res["changed_count"], res["edited_pending"], res["edited_changed"]), (1, 1, 0))
+        self.assertFalse(res["changes"][0]["edited_by_hand"])
+        self.assertEqual(res["changes"][0]["txn_id"], auto)
+
+    def test_included_hand_edited_rows_are_marked_and_listed_first(self):
+        auto = self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Shopping", match_source="Default Fallback")
+        edited = self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Restaurant", user_modified=1)
+        res = self.call(self.app.reclassify_transactions, {"apply": False, "include_edited": True})
+        self.assertEqual((res["changed_count"], res["edited_changed"], res["edited_pending"]), (2, 1, 0))
+        self.assertEqual([c["txn_id"] for c in res["changes"]], [edited, auto])
+        self.assertEqual([c["edited_by_hand"] for c in res["changes"]], [True, False])
+        self.assertEqual(self.get_txn(edited)["envelope"], "Restaurant")   # still only a preview
+
+    def test_only_the_chosen_hand_edited_rows_are_overwritten(self):
+        auto = self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Shopping", match_source="Default Fallback")
+        keep = self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Restaurant", user_modified=1)
+        pick = self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Groceries", user_modified=1)
+
+        res = self.call(self.app.reclassify_transactions, {"apply": False, "edited_ids": [pick]})
+        self.assertEqual((res["changed_count"], res["edited_changed"], res["edited_pending"]), (2, 1, 1))
+
+        res = self.call(self.app.reclassify_transactions, {"apply": True, "edited_ids": [pick]})
+        self.assertEqual(res["changed_count"], 2)
+        self.assertEqual(self.get_txn(auto)["envelope"], "Subscriptions")
+        self.assertEqual(self.get_txn(pick)["envelope"], "Subscriptions")
+        self.assertEqual(self.get_txn(keep)["envelope"], "Restaurant")   # not chosen: the hand edit stays
+
+    def test_every_hand_edited_row_is_listed_even_past_the_preview_limit(self):
+        from evbudget import reclassify
+        for _ in range(3):
+            self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Shopping", match_source="Default Fallback")
+        for _ in range(3):
+            self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Restaurant", user_modified=1)
+        c = self.conn()
+        res = reclassify.reclassify(c, include_edited=True, preview_limit=1)
+        c.close()
+        self.assertEqual(sum(1 for x in res["changes"] if x["edited_by_hand"]), 3)
+        self.assertEqual(len(res["changes"]), 4)
+        self.assertTrue(res["truncated"])
+
     def test_limited_to_chosen_rows(self):
         a = self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Shopping")
         b = self.add_txn(name="SPOTIFY", raw_name="SPOTIFY", envelope="Shopping")
         self.call(self.app.reclassify_transactions, {"apply": True, "txn_ids": [a]})
         self.assertEqual(self.get_txn(a)["envelope"], "Subscriptions")
         self.assertEqual(self.get_txn(b)["envelope"], "Shopping")
+
+
+class RerunOneRuleTests(TempAppCase):
+    RULE = {"name": "Venmo is a transfer", "filter_type": "text", "phrase": "VENMO", "match_mode": "contains",
+            "direction": "any", "set_kind": "transfer"}
+
+    def test_kind_rule_preview_and_apply_change_only_matching_unedited_rows(self):
+        hit = self.add_txn(name="VENMO PAYMENT", raw_name="VENMO PAYMENT", envelope="Shopping", amount=-40.0)
+        edited = self.add_txn(name="VENMO PAYMENT", raw_name="VENMO PAYMENT", envelope="Restaurant", amount=-9.0, user_modified=1)
+        other = self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Shopping", amount=-15.0)
+
+        p = self.call(self.app.rule_preview, self.RULE)
+        self.assertEqual((p["count"], p["would_change"], p["locked"]), (2, 1, 1))
+        self.assertEqual(p["examples"][0]["after_kind"], "transfer")
+
+        res = self.call(self.app.rule_apply, self.RULE)
+        self.assertEqual(res["changed"], 1)
+        row = self.get_txn(hit)
+        self.assertEqual((row["txn_kind"], row["is_included"], row["envelope"]), ("transfer", 0, ""))
+        self.assertTrue(row["exclusion_reason"])
+        self.assertEqual(self.get_txn(edited)["txn_kind"], "expense")   # hand edit left alone
+        self.assertEqual(self.get_txn(other)["txn_kind"], "expense")    # no match, untouched
+
+    def test_running_it_twice_changes_nothing_more(self):
+        self.add_txn(name="VENMO PAYMENT", raw_name="VENMO PAYMENT", envelope="Shopping", amount=-40.0)
+        self.call(self.app.rule_apply, self.RULE)
+        self.assertEqual(self.call(self.app.rule_apply, self.RULE)["changed"], 0)
+        self.assertEqual(self.call(self.app.rule_preview, self.RULE)["would_change"], 0)
+
+    def test_envelope_and_review_rules_still_work(self):
+        t = self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Shopping", amount=-15.0)
+        rule = {"name": "Netflix", "filter_type": "text", "phrase": "NETFLIX", "match_mode": "contains",
+                "direction": "any", "set_envelope": "Subscriptions", "set_needs_review": 1}
+        self.assertEqual(self.call(self.app.rule_apply, rule)["changed"], 1)
+        row = self.get_txn(t)
+        self.assertEqual((row["envelope"], row["needs_review"]), ("Subscriptions", 1))
+
+
+class RulesReviewTests(TempAppCase):
+    """One review screen for "this rule" and "all rules": list first, then apply exactly what was ticked."""
+    RULE = {"name": "Netflix", "filter_type": "text", "phrase": "NETFLIX", "match_mode": "contains",
+            "direction": "any", "set_envelope": "Subscriptions"}
+
+    def setUp(self):
+        super().setUp()
+        self.a = self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Shopping", match_source="Default Fallback")
+        self.b = self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Shopping", match_source="Default Fallback")
+        self.hand = self.add_txn(name="NETFLIX", raw_name="NETFLIX.COM", envelope="Restaurant", user_modified=1)
+
+    def review(self, body):
+        return self.call(self.app.rules_review, body)
+
+    def test_one_rule_review_lists_every_change_with_hand_edits_marked_and_first(self):
+        res = self.review({"scope": "rule", "rule": self.RULE})
+        self.assertEqual(res["scope"], "rule")
+        self.assertEqual([c["edited_by_hand"] for c in res["changes"]], [True, False, False])
+        first = res["changes"][0]
+        self.assertEqual((first["txn_id"], first["changed_fields"]), (self.hand, ["envelope"]))
+        self.assertEqual((first["before"]["envelope"], first["after"]["envelope"]), ("Restaurant", "Subscriptions"))
+        self.assertEqual(first["rule"], "Netflix")
+        self.assertEqual(self.get_txn(self.a)["envelope"], "Shopping")   # a review writes nothing
+
+    def test_all_rules_review_has_the_same_shape(self):
+        res = self.review({"scope": "all"})
+        self.assertEqual(res["scope"], "all")
+        by_id = {c["txn_id"]: c for c in res["changes"]}
+        self.assertTrue(by_id[self.hand]["edited_by_hand"])
+        self.assertFalse(by_id[self.a]["edited_by_hand"])
+        self.assertEqual(by_id[self.a]["after"]["envelope"], "Subscriptions")
+        self.assertEqual(res["changes"][0]["txn_id"], self.hand)
+
+    def test_apply_changes_exactly_the_ticked_rows_for_one_rule(self):
+        res = self.call(self.app.rules_review_apply, {"scope": "rule", "rule": self.RULE, "txn_ids": [self.a, self.hand]})
+        self.assertEqual(res["changed"], 2)
+        self.assertEqual(self.get_txn(self.a)["envelope"], "Subscriptions")
+        self.assertEqual(self.get_txn(self.hand)["envelope"], "Subscriptions")   # ticked, so the hand edit is replaced
+        self.assertEqual(self.get_txn(self.b)["envelope"], "Shopping")           # not ticked
+
+    def test_apply_changes_exactly_the_ticked_rows_for_all_rules(self):
+        res = self.call(self.app.rules_review_apply, {"scope": "all", "txn_ids": [self.b]})
+        self.assertEqual(res["changed"], 1)
+        self.assertEqual(self.get_txn(self.b)["envelope"], "Subscriptions")
+        self.assertEqual(self.get_txn(self.a)["envelope"], "Shopping")
+        self.assertEqual(self.get_txn(self.hand)["envelope"], "Restaurant")
+
+    def test_nothing_ticked_changes_nothing_and_is_refused(self):
+        for scope in ("rule", "all"):
+            with self.assertRaises(HttpError):
+                self.call(self.app.rules_review_apply, {"scope": scope, "rule": self.RULE, "txn_ids": []})
+        self.assertEqual(self.get_txn(self.a)["envelope"], "Shopping")
+
+    def test_bad_scope_and_incomplete_rule_are_refused(self):
+        with self.assertRaises(HttpError):
+            self.review({"scope": "everything"})
+        with self.assertRaises(HttpError):
+            self.review({"scope": "rule", "rule": {"name": "x"}})
+
+    def test_kind_rule_changes_show_the_kind_and_exclusion(self):
+        t = self.add_txn(name="VENMO", raw_name="VENMO PAYMENT", envelope="Shopping", amount=-40.0)
+        rule = {"name": "Venmo", "filter_type": "text", "phrase": "VENMO", "match_mode": "contains", "direction": "any", "set_kind": "transfer"}
+        change = [c for c in self.review({"scope": "rule", "rule": rule})["changes"] if c["txn_id"] == t][0]
+        self.assertIn("txn_kind", change["changed_fields"])
+        self.assertEqual((change["after"]["txn_kind"], change["after"]["is_included"], change["after"]["envelope"]), ("transfer", 0, ""))
 
 
 class ReimbursementTests(TempAppCase):

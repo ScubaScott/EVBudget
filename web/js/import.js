@@ -17,6 +17,7 @@ const IMPORT_STATUS_LABELS = { new: 'New', existing: 'Already saved', deleted: '
 document.addEventListener('tabchange', (e) => {
     if (e.detail.tab === 'import' && !importLoaded) {
         importLoaded = true;
+        loadImportFolder();
         importScanFolder();
     }
 });
@@ -33,12 +34,100 @@ document.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
             closeMappingModal();
-            closeImportRulesModal();
-            closeReclassifyModal();
-            closeImportHistoryModal();
+            closeImportFolderModal();
+            if (review && !document.querySelector('.modal-overlay.active')) closeReview();
         }
     });
 });
+
+// ---------------------------------------------------------------------
+// Which folder bank files are read from (saved per budget)
+// ---------------------------------------------------------------------
+let importFolder = null;       // {path, default, is_default, exists}
+let importBrowseTimer = null;
+
+async function loadImportFolder() {
+    try {
+        importFolder = await api('/api/import/folder');
+    } catch (err) { return; }
+    const label = document.getElementById('importFolderLabel');
+    label.textContent = importFolder.path;
+    label.title = importFolder.is_default ? "This budget's own input folder" : 'A folder you chose. Use Change folder to go back to the built-in one.';
+}
+
+async function openImportFolderModal() {
+    await loadImportFolder();
+    if (!importFolder) return;
+    document.getElementById('importFolderInput').value = importFolder.path;
+    document.getElementById('btnImportFolderDefault').hidden = importFolder.is_default;
+    document.getElementById('importFolderNote').textContent = importFolder.is_default
+        ? "This is the budget's built-in folder." : `The built-in folder is ${importFolder.default}`;
+    document.getElementById('importFolderOverlay').classList.add('active');
+    document.body.style.overflow = 'hidden';
+    document.getElementById('importFolderInput').focus();
+}
+
+function closeImportFolderModal() {
+    clearTimeout(importBrowseTimer);
+    importBrowseTimer = null;
+    document.getElementById('btnImportBrowse').disabled = false;
+    document.getElementById('importFolderOverlay').classList.remove('active');
+    if (!document.querySelector('.modal-overlay.active')) document.body.style.overflow = '';
+}
+
+// Opens the operating system's folder chooser on this computer, then waits for the answer
+async function importFolderBrowse() {
+    const btn = document.getElementById('btnImportBrowse');
+    const note = document.getElementById('importFolderNote');
+    btn.disabled = true;
+    try {
+        await apiPost('/api/import/folder/browse');
+    } catch (err) {
+        btn.disabled = false;
+        note.textContent = err.message;
+        return;
+    }
+    note.textContent = 'Choose a folder in the window that just opened (it may be behind this one).';
+    const started = Date.now();
+    const poll = async () => {
+        let st;
+        try { st = await api('/api/import/folder/browse'); } catch (err) { st = { state: 'error', message: err.message }; }
+        if (st.state === 'waiting' && Date.now() - started < 10 * 60 * 1000) { importBrowseTimer = setTimeout(poll, 700); return; }
+        importBrowseTimer = null;
+        btn.disabled = false;
+        if (st.state === 'done') {
+            document.getElementById('importFolderInput').value = st.path;
+            note.textContent = 'Press Use this folder to switch to it.';
+        } else if (st.state === 'unavailable') {
+            note.textContent = "This computer can't show a folder chooser. Paste or type the folder path instead.";
+        } else if (st.state === 'error') {
+            note.textContent = 'Could not open a folder chooser' + (st.message ? ': ' + st.message : '') + '. Paste or type the folder path instead.';
+        } else {
+            note.textContent = '';
+        }
+    };
+    poll();
+}
+
+async function saveImportFolder(path) {
+    const value = path === undefined ? document.getElementById('importFolderInput').value : path;
+    try {
+        importFolder = await apiPost('/api/import/folder', { path: value });
+    } catch (err) {
+        document.getElementById('importFolderNote').textContent = err.message;
+        return;
+    }
+    closeImportFolderModal();
+    await loadImportFolder();
+    importFiles = [];   // the old folder's files (and their ticks) don't apply to the new one
+    renderImportFiles();
+    await importScanFolder();
+    showToast(importFolder.is_default ? 'Using the built-in import folder.' : 'Import folder changed.');
+}
+
+function useDefaultImportFolder() {
+    saveImportFolder('');
+}
 
 // ---------------------------------------------------------------------
 // Step 1: files
@@ -127,6 +216,7 @@ function renderImportFiles() {
     const wrap = document.getElementById('importFileListWrap');
     const body = document.getElementById('importFileBody');
     wrap.hidden = importFiles.length === 0;
+    document.getElementById('importDropzone').classList.toggle('dropzone-compact', importFiles.length > 0);
     ['name', 'modified', 'imported', 'account', 'type', 'columns'].forEach(c => {
         const el = document.getElementById('ifsort_' + c);
         if (el) el.textContent = c === importFileSort.col ? (importFileSort.asc ? '▲' : '▼') : '';
@@ -390,7 +480,7 @@ function importRuleChips(r) {
 }
 
 async function importOpenRule(id) {
-    await openImportRulesModal();
+    await showImportSub('rules');
     editImportRule(id);
 }
 
@@ -650,16 +740,26 @@ const RULE_KIND_LABELS = {
     transfer: 'a transfer (left out)', cc_payment: 'a card payment (left out)', paycheck: 'a paycheck'
 };
 
-async function openImportRulesModal() {
-    document.getElementById('rulesModalOverlay').classList.add('active');
-    document.body.style.overflow = 'hidden';
-    await loadImportRules();
-    resetRuleForm();
-}
+// ---------------------------------------------------------------------
+// Import | Rules | History
+// ---------------------------------------------------------------------
+let importSub = 'import';
 
-function closeImportRulesModal() {
-    document.getElementById('rulesModalOverlay').classList.remove('active');
-    if (!document.querySelector('.modal-overlay.active')) document.body.style.overflow = '';
+// keepForm: the caller is about to fill the rule form itself, so don't clear it
+async function showImportSub(name, keepForm) {
+    importSub = name;
+    ['import', 'rules', 'history'].forEach(n => {
+        document.getElementById('importSub' + n.charAt(0).toUpperCase() + n.slice(1)).hidden = (n !== name);
+        const btn = document.getElementById('importSubBtn-' + n);
+        btn.classList.toggle('active', n === name);
+        btn.setAttribute('aria-selected', String(n === name));
+    });
+    if (name !== 'rules') closeReview();
+    if (name === 'rules' && !keepForm) {
+        await loadImportRules();
+        resetRuleForm();
+    }
+    if (name === 'history') loadImportHistory();
 }
 
 async function loadImportRules() {
@@ -734,6 +834,7 @@ function renderImportRules() {
                 <button type="button" class="btn-env-icon" title="Move up" ${i === 0 ? 'disabled' : ''} onclick="moveImportRule(${r.id}, 'up')">&uarr;</button>
                 <button type="button" class="btn-env-icon" title="Move down" ${i === last ? 'disabled' : ''} onclick="moveImportRule(${r.id}, 'down')">&darr;</button>
                 <button type="button" class="btn-env-icon" title="Move to the bottom" ${i === last ? 'disabled' : ''} onclick="moveImportRule(${r.id}, 'bottom')">&#10515;</button>
+                <button type="button" class="btn-inline-action btn-inline-cancel" title="Preview what this rule would change in saved transactions, and choose which to update" onclick="reviewSavedRule(${r.id})">Apply&hellip;</button>
                 <button type="button" class="btn-inline-action btn-inline-cancel" onclick="editImportRule(${r.id})">Edit</button>
                 <button type="button" class="btn-env-icon delete" title="Delete rule" onclick="deleteImportRule(${r.id})">&times;</button></td>
         </tr>`).join('') + (rows.length > 400 ? `<tr><td colspan="5" class="import-more">Showing 400 of ${rows.length}. Use search to narrow.</td></tr>` : '');
@@ -801,6 +902,7 @@ function scheduleRulePreview() {
                 const bits = [];
                 if (e.after_name) bits.push(`<code>${escapeHtml(e.name)}</code> &rarr; <code>${escapeHtml(e.after_name)}</code>`);
                 if (e.after_envelope) bits.push(`${escapeHtml(e.after_name || e.name)}: ${escapeHtml(e.envelope || 'no envelope')} &rarr; ${escapeHtml(e.after_envelope)}`);
+                if (e.after_kind) bits.push(`${escapeHtml(e.after_name || e.name)}: becomes ${escapeHtml(KIND_LABELS[e.after_kind] || e.after_kind)}`);
                 return bits.join(', ');
             }).filter(Boolean);
             box.innerHTML = parts.join(' &middot; ') + (ex.length ? '<br>' + ex.join('<br>') : '');
@@ -823,6 +925,7 @@ function resetRuleForm() {
     document.getElementById('ruleIncomeLabel').value = '';
     document.getElementById('ruleKind').value = 'expense';
     document.getElementById('btnRuleSave').textContent = 'Add rule';
+    document.getElementById('ruleEditorTitle').textContent = 'New rule';
     document.getElementById('btnRuleCancel').hidden = true;
     document.getElementById('ruleEditorPreview').innerHTML = '';
     onRuleFormChange();
@@ -851,10 +954,172 @@ function editImportRule(id) {
     document.getElementById('ruleIncomeLabel').value = r.set_income_label || '';
     document.getElementById('ruleDoReview').checked = !!r.set_needs_review;
     document.getElementById('btnRuleSave').textContent = 'Save changes';
+    document.getElementById('ruleEditorTitle').textContent = 'Edit rule';
     document.getElementById('btnRuleCancel').hidden = false;
     onRuleFormChange();
     document.getElementById('ruleName').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     document.getElementById('ruleName').focus();
+}
+
+// ----- review: what a rule (or every rule) would change, with a tick box on each row -----
+
+// A stored rule in the shape the review and apply calls expect
+function ruleBodyFromStored(r) {
+    return {
+        name: r.name || r.phrase || '', filter_type: r.filter_type || 'text', phrase: r.phrase || '',
+        match_mode: r.match_mode || 'contains', direction: r.direction || 'any', set_payee: r.set_payee || null,
+        set_envelope: r.set_envelope || null, set_kind: r.set_kind || null, set_income_label: r.set_income_label || null,
+        exclusion_reason: r.exclusion_reason || null, set_needs_review: r.set_needs_review ? 1 : 0
+    };
+}
+
+let review = null;   // {scope, rule, label, changes, picked: Set, show, limit}
+const REVIEW_CHUNK = 150;
+
+const REVIEW_FIELD_NAMES = { txn_kind: 'Kind', is_included: 'Included', envelope: 'Envelope', name: 'Payee', person_id: 'Person',
+    income_subtype: 'Paycheck type', income_label: 'Label', needs_review: 'Review flag', exclusion_reason: 'Reason',
+    income_source_id: 'Income source', match_source: 'Matched by' };
+
+function reviewDiff(c) {
+    return c.changed_fields.map(f => {
+        const show = v => v === null || v === '' || v === undefined ? '(none)' : (f === 'txn_kind' ? (KIND_LABELS[v] || v) : f === 'person_id' ? (personName(v) || v) : f === 'is_included' || f === 'needs_review' ? (v ? 'yes' : 'no') : v);
+        return `<span class="diff-part"><b>${REVIEW_FIELD_NAMES[f] || f}:</b> ${escapeHtml(String(show(c.before[f])))} → ${escapeHtml(String(show(c.after[f])))}</span>`;
+    }).join('');
+}
+
+// scope: 'rule' (with the rule body) or 'all'
+async function openReview(scope, rule, label) {
+    await showImportSub('rules', true);
+    const box = document.getElementById('rulesReview');
+    document.getElementById('rulesBrowse').hidden = true;
+    box.hidden = false;
+    document.getElementById('reviewTitle').textContent = scope === 'all' ? 'Apply all rules' : `Apply "${label}"`;
+    document.getElementById('reviewSub').textContent = 'Checking your saved transactions…';
+    document.getElementById('reviewBody').innerHTML = '';
+    document.getElementById('btnReviewApply').disabled = true;
+    try {
+        const res = await apiPost('/api/rules/review', { scope, rule });
+        if (res.changes.length === 0) {
+            closeReview();
+            showToast(scope === 'all' ? `Checked ${res.checked.toLocaleString()} transactions. Nothing would change.`
+                : `"${label}" has nothing to change in your saved transactions.`);
+            return;
+        }
+        review = { scope, rule, label, changes: res.changes, picked: new Set(), show: 'all', limit: REVIEW_CHUNK, checked: res.checked };
+        // Rows you never edited start ticked. Rows you edited by hand start unticked: tick them to let the rule replace your edit.
+        res.changes.forEach(c => { if (!c.edited_by_hand) review.picked.add(c.txn_id); });
+        document.querySelectorAll('#reviewFilterToggle .segmented-btn').forEach(b => b.classList.toggle('active', b.dataset.show === 'all'));
+        renderReview();
+        box.scrollIntoView({ block: 'nearest' });
+    } catch (err) {
+        closeReview();
+        showToast('Could not check the rule: ' + err.message, true);
+    }
+}
+
+function reviewVisible() {
+    if (!review) return [];
+    return review.changes.filter(c => review.show === 'all' || (review.show === 'edited') === !!c.edited_by_hand);
+}
+
+function reviewRowHtml(c) {
+    const edited = c.edited_by_hand;
+    const badge = edited ? ' <span class="kind-badge kind-review" title="You changed this row yourself. Tick it to let the rules replace your edit.">Edited by hand</span>' : '';
+    return `<tr${edited ? ' class="review-edited"' : ''}>
+        <td style="text-align:center;"><input type="checkbox" class="txn-checkbox review-pick" data-id="${escapeHtml(c.txn_id)}" ${review.picked.has(c.txn_id) ? 'checked' : ''} onchange="reviewPick(this.dataset.id, this.checked)" aria-label="Apply this change"></td>
+        <td style="white-space:nowrap;">${escapeHtml(formatDisplayDate(c.date))}</td>
+        <td>${escapeHtml(c.after.name)}${badge}<div class="import-file-sub">${escapeHtml(c.raw_name || '')}</div></td>
+        <td class="amount-cell" style="text-align:right;">${formatSigned(c.amount)}</td>
+        <td>${reviewDiff(c)}</td><td>${escapeHtml(c.rule || '')}</td></tr>`;
+}
+
+// Redraw the list, the counts, the select-all box and the Apply button from what is picked
+function renderReview() {
+    if (!review) return;
+    const vis = reviewVisible();
+    const shown = vis.slice(0, review.limit);
+    document.getElementById('reviewBody').innerHTML = shown.map(reviewRowHtml).join('') ||
+        '<tr><td colspan="6" class="import-more">Nothing in this view.</td></tr>';
+    const more = document.getElementById('reviewMore');
+    more.hidden = vis.length <= shown.length;
+    more.innerHTML = vis.length > shown.length
+        ? `<button type="button" class="btn-bulk-action" onclick="review.limit += REVIEW_CHUNK * 2; renderReview();">Show more (${(vis.length - shown.length).toLocaleString()} hidden)</button>` : '';
+
+    const total = review.changes.length, n = review.picked.size;
+    const edited = review.changes.filter(c => c.edited_by_hand);
+    const editedPicked = edited.filter(c => review.picked.has(c.txn_id)).length;
+    document.getElementById('reviewSub').textContent = review.scope === 'all'
+        ? `Checked ${review.checked.toLocaleString()} transactions with every rule. ${total.toLocaleString()} would change. Untick anything you don't want changed.`
+        : `Matches ${review.checked.toLocaleString()} saved transaction${review.checked === 1 ? '' : 's'}; ${total.toLocaleString()} would change. Untick anything you don't want changed.`;
+    document.getElementById('reviewEditedCount').textContent = edited.length ? `(${edited.length.toLocaleString()})` : '';
+    document.getElementById('reviewCount').textContent = `${n.toLocaleString()} of ${total.toLocaleString()} selected`;
+    const all = document.getElementById('reviewSelectAll');
+    const visPicked = vis.filter(c => review.picked.has(c.txn_id)).length;
+    all.checked = vis.length > 0 && visPicked === vis.length;
+    all.indeterminate = visPicked > 0 && visPicked < vis.length;
+    document.getElementById('reviewWarn').textContent = editedPicked
+        ? `${editedPicked.toLocaleString()} hand-edited row${editedPicked === 1 ? ' is' : 's are'} ticked and will be overwritten.` : '';
+    const apply = document.getElementById('btnReviewApply');
+    apply.textContent = `Apply ${n.toLocaleString()} selected`;
+    apply.disabled = n === 0;
+}
+
+function reviewPick(id, checked) {
+    if (!review) return;
+    checked ? review.picked.add(id) : review.picked.delete(id);
+    renderReview();
+}
+
+// Select all (or none) of what the current filter shows, including rows not drawn yet
+function reviewSelectAll(checked) {
+    if (!review) return;
+    reviewVisible().forEach(c => { checked ? review.picked.add(c.txn_id) : review.picked.delete(c.txn_id); });
+    renderReview();
+}
+
+function reviewSetShow(mode) {
+    if (!review) return;
+    review.show = mode;
+    review.limit = REVIEW_CHUNK;
+    document.querySelectorAll('#reviewFilterToggle .segmented-btn').forEach(b => b.classList.toggle('active', b.dataset.show === mode));
+    renderReview();
+}
+
+function closeReview() {
+    review = null;
+    const box = document.getElementById('rulesReview');
+    if (box) box.hidden = true;
+    const browse = document.getElementById('rulesBrowse');
+    if (browse) browse.hidden = false;
+}
+
+async function applyReview() {
+    if (!review || review.picked.size === 0) return;
+    const apply = document.getElementById('btnReviewApply');
+    apply.disabled = true;
+    try {
+        const res = await apiPost('/api/rules/review/apply', { scope: review.scope, rule: review.rule, txn_ids: [...review.picked] });
+        const label = review.scope === 'all' ? 'Rules' : `"${review.label}"`;
+        closeReview();
+        await refreshTransactions();
+        showToast(`${label} updated ${res.changed.toLocaleString()} saved transaction${res.changed === 1 ? '' : 's'}.`);
+    } catch (err) {
+        showToast('Could not apply: ' + err.message, true);
+        apply.disabled = false;
+    }
+}
+
+// The three ways in
+function reviewAllRules() { openReview('all', null, ''); }
+
+function reviewRuleFromForm() {
+    const body = ruleFormData();
+    openReview('rule', body, body.name || body.phrase || 'This rule');
+}
+
+function reviewSavedRule(id) {
+    const r = rulesData.find(x => x.id === id);
+    if (r) openReview('rule', ruleBodyFromStored(r), r.name || r.phrase || 'This rule');
 }
 
 // Adds a new rule, or saves the one being edited
@@ -869,16 +1134,11 @@ async function saveRuleFromForm() {
     try {
         const saved = await apiPost('/api/rules/save', body);
         const p = await apiPost('/api/rules/preview', body);
-        let note = '';
-        if (p.would_change > 0 && confirm(`This rule would also change ${p.would_change} saved transaction${p.would_change === 1 ? '' : 's'}.\n\nApply it to ${p.would_change === 1 ? 'it' : 'them'} now? Ones you edited by hand are left alone.`)) {
-            const done = await apiPost('/api/rules/apply', body);
-            note = ` ${done.changed} saved transaction${done.changed === 1 ? '' : 's'} updated.`;
-            await refreshTransactions();
-        }
         resetRuleForm();
         await loadImportRules();
-        showToast(`Rule ${wasEdit ? 'updated' : 'added'}.` + note);
-        if (!wasEdit) document.querySelector('.rules-table-wrap').scrollTop = 0;
+        showToast(`Rule ${wasEdit ? 'updated' : 'added'}.`);
+        // Offer the same preview-and-choose screen when the rule would change saved transactions; Back skips it
+        if (p.would_change > 0) await openReview('rule', body, body.name || body.phrase || 'This rule');
         return saved;
     } catch (err) {
         showToast('Could not save the rule: ' + err.message, true);
@@ -921,69 +1181,9 @@ async function deleteImportRule(id) {
 }
 
 // ---------------------------------------------------------------------
-// Re-run rules
-// ---------------------------------------------------------------------
-async function openReclassifyModal() {
-    document.getElementById('reclassifyModalOverlay').classList.add('active');
-    document.body.style.overflow = 'hidden';
-    await runReclassifyPreview();
-}
-
-function closeReclassifyModal() {
-    document.getElementById('reclassifyModalOverlay').classList.remove('active');
-    if (!document.querySelector('.modal-overlay.active')) document.body.style.overflow = '';
-}
-
-async function runReclassifyPreview() {
-    const summary = document.getElementById('reclassifySummary');
-    const apply = document.getElementById('btnReclassifyApply');
-    summary.textContent = 'Checking…';
-    apply.disabled = true;
-    try {
-        const res = await apiPost('/api/transactions/reclassify', {
-            apply: false, include_edited: document.getElementById('reclassifyIncludeEdited').checked
-        });
-        summary.innerHTML = res.changed_count === 0
-            ? `Checked ${res.checked.toLocaleString()} transactions. <strong>Nothing would change.</strong>`
-            : `Checked ${res.checked.toLocaleString()} transactions. <strong>${res.changed_count.toLocaleString()} would change</strong>${res.truncated ? ' (first ' + res.changes.length + ' shown)' : ''}.`;
-        document.getElementById('reclassifyBody').innerHTML = res.changes.map(c => {
-            const parts = c.changed_fields.map(f => {
-                const nice = { txn_kind: 'Kind', is_included: 'Included', envelope: 'Envelope', name: 'Payee', person_id: 'Person',
-                    income_subtype: 'Paycheck type', income_label: 'Label', needs_review: 'Review flag', exclusion_reason: 'Reason',
-                    income_source_id: 'Income source', match_source: 'Matched by' }[f] || f;
-                const show = v => v === null || v === '' || v === undefined ? '(none)' : (f === 'txn_kind' ? (KIND_LABELS[v] || v) : f === 'person_id' ? (personName(v) || v) : f === 'is_included' || f === 'needs_review' ? (v ? 'yes' : 'no') : v);
-                return `<span class="diff-part"><b>${nice}:</b> ${escapeHtml(String(show(c.before[f])))} → ${escapeHtml(String(show(c.after[f])))}</span>`;
-            }).join('');
-            return `<tr><td>${escapeHtml(formatDisplayDate(c.date))}</td><td>${escapeHtml(c.after.name)}<div class="import-file-sub">${escapeHtml(c.raw_name || '')}</div></td><td class="amount-cell" style="text-align:right;">${formatSigned(c.amount)}</td><td>${parts}</td><td>${escapeHtml(c.rule || '')}</td></tr>`;
-        }).join('');
-        apply.disabled = res.changed_count === 0;
-    } catch (err) {
-        summary.textContent = 'Could not check: ' + err.message;
-    }
-}
-
-async function applyReclassify() {
-    const apply = document.getElementById('btnReclassifyApply');
-    apply.disabled = true;
-    try {
-        const res = await apiPost('/api/transactions/reclassify', {
-            apply: true, include_edited: document.getElementById('reclassifyIncludeEdited').checked
-        });
-        showToast(`Updated ${res.changed_count.toLocaleString()} transaction${res.changed_count === 1 ? '' : 's'}.`);
-        closeReclassifyModal();
-        await refreshTransactions();
-    } catch (err) {
-        showToast('Could not apply: ' + err.message, true);
-        apply.disabled = false;
-    }
-}
-
-// ---------------------------------------------------------------------
 // History
 // ---------------------------------------------------------------------
-async function openImportHistoryModal() {
-    document.getElementById('historyModalOverlay').classList.add('active');
-    document.body.style.overflow = 'hidden';
+async function loadImportHistory() {
     const body = document.getElementById('historyBody');
     body.innerHTML = '<tr><td colspan="5">Loading…</td></tr>';
     try {
@@ -1001,9 +1201,4 @@ async function openImportHistoryModal() {
     } catch (err) {
         body.innerHTML = `<tr><td colspan="5">Could not load history: ${escapeHtml(err.message)}</td></tr>`;
     }
-}
-
-function closeImportHistoryModal() {
-    document.getElementById('historyModalOverlay').classList.remove('active');
-    if (!document.querySelector('.modal-overlay.active')) document.body.style.overflow = '';
 }
