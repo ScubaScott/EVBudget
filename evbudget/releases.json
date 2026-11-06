@@ -1,5 +1,32 @@
 [
   {
+    "version": "4.0",
+    "date": "2026-11-05",
+    "title": "Sync your bank directly, and accounts come first",
+    "notes": [
+      {
+        "type": "new",
+        "text": "Import > Bank sync: connect your bank through SimpleFIN, press Sync, and new transactions appear on the review screen just like a bank file. Nothing is saved until you press Save, and your rules and duplicate checks apply as usual."
+      },
+      {
+        "type": "new",
+        "text": "Choose which of your accounts each bank account goes to (or leave one out), and change that any time."
+      },
+      {
+        "type": "improved",
+        "text": "Every import now goes to an account from your Accounts list. If a file or bank account doesn't match one yet, EVBudget takes you to Accounts to add it, with a suggested name, then brings you back with it chosen."
+      },
+      {
+        "type": "improved",
+        "text": "Duplicate spotting now also pairs a synced transaction with the same purchase from a bank file or statement, even when the bank words the name differently, and tells you how sure it is."
+      },
+      {
+        "type": "improved",
+        "text": "After you pick an envelope on the import screen, a friendly box asks whether to make a rule for that payee. Say yes and the rule opens in a window so you can check and change it, without leaving the import screen. Other rows in the same import with that payee are updated too."
+      }
+    ]
+  },
+  {
     "version": "3.7",
     "date": "2026-11-02",
     "title": "Bills match their payments more reliably, and price changes get noticed",

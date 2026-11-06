@@ -2,6 +2,7 @@ import unittest
 
 from helpers import TempAppCase
 from evbudget import import_engine, store
+from evbudget.http_util import HttpError
 from evbudget.textutil import generate_deterministic_txn_id, parse_date_string, sanitize_text
 
 CHASE = """Transaction Date,Post Date,Description,Category,Type,Amount,Memo
@@ -180,3 +181,54 @@ class ImportFlowTests(TempAppCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImportNeedsListedAccountTests(TempAppCase):
+    """Imports only go to accounts already on the Accounts list; the import screen never makes one."""
+
+    CSV = "Transaction Date,Post Date,Description,Category,Type,Amount,Memo\n10/05/2026,10/06/2026,CORNER CAFE,Food,Sale,-42.10,\n"
+
+    def setUp(self):
+        super().setUp()
+        self.write_csv("Chase3653_Activity.csv", self.CSV)
+
+    def inspect(self):
+        return self.call(self.app.import_inspect, {"filenames": ["Chase3653_Activity.csv"]})["files"][0]
+
+    def preview(self, info, account):
+        return self.call(self.app.import_preview, {"files": [dict(info, account_name=account)]})
+
+    def account_count(self):
+        c = self.conn()
+        n = c.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
+        c.close()
+        return n
+
+    def test_a_name_not_on_the_list_is_only_suggested(self):
+        info = self.inspect()
+        self.assertEqual((info["account_name"], info["suggested_account"]), ("", "Chase 3653"))
+        self.call(self.app.accounts_save, {"name": "chase 3653", "account_type": "Credit / Debit"})
+        info = self.inspect()
+        self.assertEqual((info["account_name"], info["suggested_account"]), ("chase 3653", ""))
+
+    def test_reading_a_file_needs_an_account_from_the_list(self):
+        info = self.inspect()
+        for account in ("", "Chase 3653"):
+            with self.assertRaises(HttpError) as ctx:
+                self.preview(info, account)
+            self.assertEqual(ctx.exception.status, 400)
+            self.assertIn("Accounts first", str(ctx.exception))
+        self.assertEqual(self.account_count(), 0)
+        self.call(self.app.accounts_save, {"name": "Chase 3653", "account_type": "Credit / Debit"})
+        pv = self.preview(info, "CHASE 3653")
+        self.assertEqual({r["account_name"] for r in pv["records"]}, {"Chase 3653"})   # the listed spelling
+
+    def test_saving_rows_for_an_account_not_on_the_list_is_refused(self):
+        self.call(self.app.accounts_save, {"name": "Chase 3653", "account_type": "Credit / Debit"})
+        pv = self.preview(self.inspect(), "Chase 3653")
+        rows = [dict(r, account_name="Made Up") for r in pv["records"]]
+        with self.assertRaises(HttpError):
+            self.call(self.app.import_commit, {"records": rows, "files": ["Chase3653_Activity.csv"]})
+        self.assertEqual(self.account_count(), 1)
+        res = self.call(self.app.import_commit, {"records": pv["records"], "files": ["Chase3653_Activity.csv"]})
+        self.assertEqual(res["inserted"], 1)

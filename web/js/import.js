@@ -11,6 +11,7 @@ let importSummaryData = null;
 let importMappingIndex = null;
 let importEnvelopes = [];
 let importLoaded = false;
+let importMode = 'files';        // what the review grid shows: 'files' (bank files) or 'sync' (bank sync, see simplefin.js)
 
 const IMPORT_STATUS_LABELS = { new: 'New', existing: 'Already saved', deleted: 'Deleted earlier' };
 
@@ -35,6 +36,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key === 'Escape') {
             closeMappingModal();
             closeImportFolderModal();
+            closeAskRule();
+            closeRuleModal();
             if (review && !document.querySelector('.modal-overlay.active')) closeReview();
         }
     });
@@ -246,8 +249,7 @@ function renderImportFiles() {
             <td><div style="font-weight:500;">${escapeHtml(f.filename)}</div><div class="import-file-sub">${fileSub}</div>${warn}</td>
             <td style="white-space:nowrap;">${escapeHtml(formatDisplayDate(f.modified))}</td>
             <td>${imported}</td>
-            <td><input type="text" class="input-text import-mini" list="importAccountList" maxlength="60" placeholder="Card name"
-                       value="${escapeHtml(f.account_name || '')}" onchange="importFiles[${i}].account_name = this.value.trim()"></td>
+            <td>${importAccountCell(i, f)}</td>
             <td>
                 <select class="select-input import-mini" onchange="importFiles[${i}].account_type = this.value">
                     <option value="Bank / Checking" ${f.account_type === 'Bank / Checking' ? 'selected' : ''}>Bank / Checking</option>
@@ -257,13 +259,64 @@ function renderImportFiles() {
             <td>${mapped} ${editBtn}</td>
         </tr>`;
     }).join('');
-    document.getElementById('importAccountList').innerHTML = importAccountNames.map(n => `<option value="${escapeHtml(n)}">`).join('');
     updateImportSelectionHint();
+}
+
+// The account a file goes to: one from the Accounts list. If it isn't there, the last choice sends the person to
+// add it first (with the name the file suggests), then brings them back with it chosen.
+function importAccountCell(i, f) {
+    const opts = importAccountNames.map(n => `<option value="${escapeHtml(n)}" ${n === f.account_name ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('');
+    const missing = !f.account_name;
+    const hint = missing && f.suggested_account
+        ? `<div class="import-file-sub">Not listed? <a href="#" onclick="importAddAccountFor(${i}); return false;">Add &ldquo;${escapeHtml(f.suggested_account)}&rdquo;</a></div>`
+        : '';
+    return `<select class="select-input import-mini${missing && f.selected ? ' import-needs-account' : ''}" onchange="importSetFileAccount(${i}, this)">
+            <option value="" ${missing ? 'selected' : ''}>Choose an account&hellip;</option>${opts}
+            <option value="__add">+ Add a new account&hellip;</option>
+        </select>${hint}`;
+}
+
+function importSetFileAccount(i, sel) {
+    if (sel.value === '__add') {
+        sel.value = importFiles[i].account_name || '';
+        importAddAccountFor(i);
+        return;
+    }
+    importFiles[i].account_name = sel.value;
+    renderImportFiles();
+}
+
+function importAddAccountFor(i) {
+    const f = importFiles[i];
+    acctGoAdd(f.filename, f.suggested_account || '', f.account_type, (name) => {
+        f.account_name = name;
+        renderImportFiles();
+    });
+}
+
+// The Accounts list may have changed: refresh the choices, and fill in files whose suggested name now exists
+async function importRefreshAccounts() {
+    if (!importFiles.length) return;
+    try {
+        const d = await api('/api/accounts');
+        importAccountNames = d.accounts.map(a => a.name);
+    } catch (err) {
+        return;    // the boxes keep the list they had
+    }
+    const byLower = new Map(importAccountNames.map(n => [n.toLowerCase(), n]));
+    importFiles.forEach(f => {
+        if (f.account_name && !byLower.has(f.account_name.toLowerCase())) f.account_name = '';   // deleted or renamed
+        else if (f.account_name) f.account_name = byLower.get(f.account_name.toLowerCase());
+        if (!f.account_name && f.suggested_account && byLower.has(f.suggested_account.toLowerCase())) {
+            f.account_name = byLower.get(f.suggested_account.toLowerCase());
+        }
+    });
+    renderImportFiles();
 }
 
 function importToggleFile(i, checked) {
     importFiles[i].selected = checked;
-    updateImportSelectionHint();
+    renderImportFiles();     // a ticked file with no account is marked
 }
 
 function importSelectFiles(mode) {
@@ -276,9 +329,12 @@ function importSelectFiles(mode) {
 
 function updateImportSelectionHint() {
     const n = importFiles.filter(f => f.selected).length;
+    const noAccount = importFiles.filter(f => f.selected && !f.account_name).length;
     document.getElementById('importFileCount').textContent = `${importFiles.length} file${importFiles.length === 1 ? '' : 's'} in folder`;
-    document.getElementById('importProcessHint').textContent = n ? `${n} file${n === 1 ? '' : 's'} selected` : 'Select at least one file';
-    document.getElementById('btnImportProcess').disabled = n === 0;
+    document.getElementById('importProcessHint').textContent = !n ? 'Select at least one file'
+        : noAccount ? `Choose an account for ${noAccount === 1 ? 'the selected file' : noAccount + ' selected files'} (add it under Accounts if it isn't listed)`
+        : `${n} file${n === 1 ? '' : 's'} selected`;
+    document.getElementById('btnImportProcess').disabled = n === 0 || noAccount > 0;
 }
 
 // ---------------------------------------------------------------------
@@ -349,18 +405,7 @@ async function importProcess() {
                 account_name: f.account_name, memory_key: f.memory_key
             }))
         });
-        importRecords = data.records.map(r => Object.assign({ skip: !!(r.likely_duplicate && r.status === 'new'), restore: false }, r));
-        importSummaryData = data.summary;
-        importEnvelopes = data.envelopes || configuredEnvelopesList;
-        peopleList = data.people || peopleList;
-        incomeSourcesList = data.income_sources || incomeSourcesList;
-        importFilter = importSummaryData.new > 0 ? 'new' : 'all';
-        importRenderLimit = 300;
-        document.getElementById('importDoneBanner').hidden = true;
-        document.getElementById('importReviewSection').hidden = false;
-        renderImportSummary();
-        importRenderGrid();
-        document.getElementById('importReviewSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        importShowPreview(data, 'files');
     } catch (err) {
         showToast('Could not read the files: ' + err.message, true);
     } finally {
@@ -368,6 +413,23 @@ async function importProcess() {
         btn.textContent = 'Process & review →';
         updateImportSelectionHint();
     }
+}
+
+// Fill the review grid from a preview (bank files or bank sync). Rows that look already saved start unticked.
+function importShowPreview(data, mode, quiet) {
+    importMode = mode;
+    importRecords = data.records.map(r => Object.assign({ skip: !!(r.likely_duplicate && r.status === 'new'), restore: false }, r));
+    importSummaryData = data.summary;
+    importEnvelopes = data.envelopes || configuredEnvelopesList;
+    peopleList = data.people || peopleList;
+    incomeSourcesList = data.income_sources || incomeSourcesList;
+    importFilter = importSummaryData.new > 0 ? 'new' : 'all';
+    importRenderLimit = 300;
+    document.getElementById('importDoneBanner').hidden = true;
+    document.getElementById('importReviewSection').hidden = false;
+    renderImportSummary();
+    importRenderGrid();
+    if (!quiet) document.getElementById('importReviewSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function renderImportSummary() {
@@ -378,13 +440,16 @@ function renderImportSummary() {
     renderImportDupNote();
     document.getElementById('importSummary').innerHTML =
         card('income', 'New rows', (s.new - (s.likely_duplicates || 0)).toLocaleString(), 'Will be saved') +
-        (s.likely_duplicates ? card('net', 'Look already saved', s.likely_duplicates.toLocaleString(), 'Same date, amount and merchant. Left unticked') : '') +
+        (s.likely_duplicates ? card('net', 'Look already saved', s.likely_duplicates.toLocaleString(), 'Same amount, a few days apart. Left unticked') : '') +
         card('count', 'Already saved', s.existing.toLocaleString(), 'Left exactly as they are') +
         card('net', 'Need review', s.needs_review_new.toLocaleString(), 'Unmatched deposits and reimbursements') +
         card('spend', 'Excluded', s.excluded_new.toLocaleString(), 'Transfers and card payments') +
         card('count', 'Deleted earlier', (s.deleted || 0).toLocaleString(), 'Not brought back') +
-        card('count', 'Skipped', ((s.skipped_bad_date || 0) + (s.duplicates_across_files || 0)).toLocaleString(),
-            `${s.skipped_bad_date || 0} unreadable date, ${s.duplicates_across_files || 0} repeated across files`);
+        (importMode === 'sync'
+            ? card('count', 'Not brought in', ((s.pending || 0) + (s.before_start || 0) + (s.skipped_bad_date || 0)).toLocaleString(),
+                `${s.pending || 0} still pending (they come in once the bank posts them)${s.before_start ? `, ${s.before_start} before an account's starting day (change it with Accounts&hellip; under Bank sync)` : ''}${s.skipped_bad_date ? `, ${s.skipped_bad_date} unreadable` : ''}`)
+            : card('count', 'Skipped', ((s.skipped_bad_date || 0) + (s.duplicates_across_files || 0)).toLocaleString(),
+                `${s.skipped_bad_date || 0} unreadable date, ${s.duplicates_across_files || 0} repeated across files`));
 }
 
 function importRowMatchesFilter(r) {
@@ -404,7 +469,7 @@ function importVisibleRows() {
     const rows = importRecords
         .map((r, idx) => ({ r, idx }))
         .filter(({ r }) => importRowMatchesFilter(r))
-        .filter(({ r }) => !q || [r.name, r.raw_name, r.envelope, r.match_source, r.income_label, String(r.amount), r.date, KIND_LABELS[r.txn_kind]]
+        .filter(({ r }) => !q || [r.name, r.raw_name, r.envelope, r.match_source, r.income_label, r.account_name, String(r.amount), r.date, KIND_LABELS[r.txn_kind]]
             .some(v => (v || '').toString().toLowerCase().includes(q)));
     const dir = importSort.asc ? 1 : -1;
     rows.sort((a, b) => {
@@ -421,7 +486,7 @@ function importVisibleRows() {
 function importSortBy(col) {
     if (importSort.col === col) importSort.asc = !importSort.asc;
     else importSort = { col, asc: col !== 'date' };
-    ['date', 'name', 'amount', 'status', 'match_source'].forEach(c => {
+    ['date', 'name', 'amount', 'account_name', 'status', 'match_source'].forEach(c => {
         const el = document.getElementById('isort_' + c);
         if (el) el.textContent = c === importSort.col ? (importSort.asc ? '▲' : '▼') : '';
     });
@@ -493,7 +558,10 @@ function importDupHint(r) {
     const d = r.likely_duplicate;
     if (!d || r.status !== 'new') return '';
     const where = [d.account_name, d.source_file].filter(Boolean).join(', ');
-    return `<div class="import-dup-hint">Looks like ${escapeHtml(formatDisplayDate(d.date))} &ldquo;${escapeHtml(d.name)}&rdquo;${where ? ' already saved from ' + escapeHtml(where) : ' already saved'}</div>`;
+    const why = d.confidence === 'medium'
+        ? confidencePill('medium', 'Medium confidence: same account and amount, a few days apart, but worded differently. Bank sync words purchases its own way, so this is usually the same purchase. Tick the row if it is a different one.')
+        : confidencePill('high', 'High confidence: same amount, a few days apart, and the descriptions match.');
+    return `<div class="import-dup-hint">${why} Looks like ${escapeHtml(formatDisplayDate(d.date))} &ldquo;${escapeHtml(d.name)}&rdquo;${where ? ' already saved from ' + escapeHtml(where) : ' already saved'}</div>`;
 }
 
 // What to do about rows that look like ones already saved, and the tip for a replaced card
@@ -502,8 +570,11 @@ function renderImportDupNote() {
     const n = importSummaryData ? (importSummaryData.likely_duplicates || 0) : 0;
     if (!n) { box.hidden = true; return; }
     box.hidden = false;
-    box.innerHTML = `<strong>${n.toLocaleString()} row${n === 1 ? '' : 's'} look like transactions you already saved</strong> (same date, amount and merchant), probably under another account. This happens when a card is reissued with a new number, or a statement covers days an earlier file already had. They start unticked so they are not saved twice.
-        Tick one if it really is a separate purchase.
+    const intro = importMode === 'sync'
+        ? 'Bank sync covers days your bank files already brought in, and words purchases its own way, so these are paired with saved rows in the same account by amount and date.'
+        : 'This happens when a card is reissued with a new number, or a statement covers days an earlier file already had.';
+    box.innerHTML = `<strong>${n.toLocaleString()} row${n === 1 ? ' looks like a transaction' : 's look like transactions'} you already saved.</strong> ${intro} They start unticked so they are not saved twice,
+        and when you save, EVBudget remembers each pairing so it won't ask about them again. Tick one if it really is a separate purchase.
         <button type="button" class="btn-inline-action btn-inline-cancel" onclick="importTickDuplicates(true)">Tick them anyway</button>
         <button type="button" class="btn-inline-action btn-inline-cancel" onclick="setImportFilter('duplicate')">Show only these</button>
         <div class="import-hint" style="margin-top: 6px;">Replacing a card? After saving, Import &rarr; Accounts &rarr; Merge puts the old and new card in one account.</div>`;
@@ -577,6 +648,7 @@ function importRowHtml(r, idx) {
         <td style="white-space:nowrap;">${escapeHtml(formatDisplayDate(r.date))}</td>
         <td><input type="text" class="input-text import-name" ${dis} value="${escapeHtml(r.name)}" title="${escapeHtml(r.raw_name)}" onchange="importSetField(${idx}, 'name', this.value)">${importOriginalText(r)}${importDupHint(r)}</td>
         <td class="amount-cell ${amtClass}">${isNeg ? '-' : '+'}${formatCurrency(Math.abs(r.amount))}</td>
+        <td class="import-account" title="${escapeHtml(r.account_name || '')}">${r.account_name ? escapeHtml(r.account_name) : '<span class="import-muted">&mdash;</span>'}</td>
         <td><select class="select-input import-mini import-kind" ${dis} onchange="importSetKind(${idx}, this.value)">${importKindOptions(r.txn_kind)}</select></td>
         <td><div class="import-target">${target}</div></td>
         <td>${statusCell}</td>
@@ -591,22 +663,31 @@ function importRenderGrid() {
     const shown = rows.slice(0, importRenderLimit);
     let html = shown.map(({ r, idx }) => importRowHtml(r, idx)).join('');
     if (rows.length > shown.length) {
-        html += `<tr><td colspan="10" class="import-more"><button type="button" class="btn-bulk-action" onclick="importRenderLimit += 400; importRenderGrid();">Show ${Math.min(400, rows.length - shown.length)} more (${rows.length - shown.length} hidden)</button></td></tr>`;
+        html += `<tr><td colspan="11" class="import-more"><button type="button" class="btn-bulk-action" onclick="importRenderLimit += 400; importRenderGrid();">Show ${Math.min(400, rows.length - shown.length)} more (${rows.length - shown.length} hidden)</button></td></tr>`;
     }
     if (rows.length === 0) {
-        html = '<tr><td colspan="10" class="import-more">No rows match this filter.</td></tr>';
+        html = '<tr><td colspan="11" class="import-more">No rows match this filter.</td></tr>';
     }
     document.getElementById('importGridBody').innerHTML = html;
     updateImportSaveBar();
     updateImportSaveAll();
 }
 
+// Rows left unticked because they look already saved: saving remembers that they are the saved row
+function importLinks() {
+    return importRecords.filter(r => r.status === 'new' && r.skip && r.likely_duplicate)
+        .map(r => ({ txn_id: r.txn_id, alias_of: r.likely_duplicate.txn_id }));
+}
+
 function updateImportSaveBar() {
     const toSave = importRecords.filter(r => (r.status === 'new' && !r.skip) || (r.status === 'deleted' && r.restore));
+    const links = importLinks().length;
     const review = toSave.filter(r => r.needs_review).length;
     const btn = document.getElementById('btnImportCommit');
-    btn.disabled = toSave.length === 0;
-    btn.textContent = toSave.length === 0 ? 'Nothing new to save' : `Save ${toSave.length.toLocaleString()} new transaction${toSave.length === 1 ? '' : 's'}`;
+    btn.disabled = toSave.length === 0 && links === 0;
+    btn.textContent = toSave.length
+        ? `Save ${toSave.length.toLocaleString()} new transaction${toSave.length === 1 ? '' : 's'}`
+        : links ? `Confirm ${links.toLocaleString()} already saved` : 'Nothing new to save';
     document.getElementById('importSaveHint').textContent = review
         ? `${review} of these still need a decision. You can save now and finish them later under Analytics → Needs review.`
         : (toSave.length ? 'Everything looks decided.' : '');
@@ -682,24 +763,85 @@ async function importSetEnvelope(idx, envelope) {
     if (r.txn_kind !== 'expense' || !envelope) return;
     const phrase = (r.name || '').replace(/CHECK #[0-9]+/g, '').trim();
     if (!phrase) return;
-    if (!confirm(`Always send "${phrase}" to "${envelope}" from now on?`)) return;
+    askMakeRule(phrase, envelope);
+}
+
+// ----- offer a rule after an envelope change, and edit it in a dialog without leaving the import screen -----
+let askRulePending = null;
+let ruleModalOpen = false;
+
+function askMakeRule(phrase, envelope) {
+    askRulePending = { phrase, envelope };
+    document.getElementById('askRuleText').innerHTML =
+        `Next time <b>${escapeHtml(phrase)}</b> shows up, EVBudget can send it to <b>${escapeHtml(envelope)}</b> for you.`;
+    document.getElementById('askRuleOverlay').classList.add('active');
+}
+
+function closeAskRule() {
+    document.getElementById('askRuleOverlay').classList.remove('active');
+}
+
+async function askRuleYes() {
+    const pending = askRulePending;
+    closeAskRule();
+    if (pending) await openRuleModal(pending.phrase, pending.envelope);
+}
+
+async function openRuleModal(phrase, envelope) {
+    if (ruleModalOpen) return;
     try {
-        const learned = await apiPost('/api/rules/learn', { phrase, envelope });
-        let updated = 0;
-        importRecords.forEach(o => {
-            if (o.status === 'new' && !o.edited && o.txn_kind === 'expense' && (o.name || '').toUpperCase().includes(phrase.toUpperCase())) {
-                o.envelope = envelope;
-                o.match_source = phrase;
-                o.rules = [{ id: learned.id, name: phrase, did: ['→ ' + envelope] }];
-                o.notes = [];
-                updated++;
-            }
-        });
-        importRenderGrid();
-        showToast(`Rule saved: "${phrase}" → ${envelope}` + (updated ? ` (${updated} other row${updated === 1 ? '' : 's'} updated)` : ''));
-    } catch (err) {
-        showToast('Could not save the rule: ' + err.message, true);
+        await loadImportRules();   // fills the envelope list and the rule order
+    } catch (err) { /* loadImportRules reports its own error */ }
+    resetRuleForm();
+    document.getElementById('ruleFindText').value = phrase;
+    document.getElementById('ruleDoEnvelope').checked = true;
+    const sel = document.getElementById('ruleEnvelope');
+    if (![...sel.options].some(o => o.value === envelope)) {
+        sel.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(envelope)}">${escapeHtml(envelope)}</option>`);
     }
+    sel.value = envelope;
+    // The editor form moves into the dialog while it is open
+    document.getElementById('ruleModalBody').appendChild(document.getElementById('ruleForm'));
+    ruleModalOpen = true;
+    document.getElementById('btnRuleSave').textContent = 'Add rule';
+    document.getElementById('btnRuleCancel').hidden = false;
+    document.getElementById('btnRuleRerun').hidden = true;
+    document.getElementById('ruleRerunHint').hidden = true;
+    onRuleFormChange();
+    document.getElementById('ruleModalOverlay').classList.add('active');
+    document.getElementById('ruleName').focus();
+}
+
+function closeRuleModal() {
+    if (!ruleModalOpen) return;
+    ruleModalOpen = false;
+    document.getElementById('ruleModalOverlay').classList.remove('active');
+    document.getElementById('ruleEditorCard').appendChild(document.getElementById('ruleForm'));
+    document.getElementById('btnRuleRerun').hidden = false;
+    document.getElementById('ruleRerunHint').hidden = false;
+    resetRuleForm();
+}
+
+function cancelRuleForm() {
+    if (ruleModalOpen) closeRuleModal(); else resetRuleForm();
+}
+
+// Rows in the batch being reviewed that the new rule would also send to its envelope
+function importApplyNewRule(rule, ruleId) {
+    if (rule.filter_type !== 'text' || rule.match_mode !== 'contains' || !rule.phrase || !rule.set_envelope || rule.direction === 'in') return 0;
+    const needle = rule.phrase.toUpperCase();
+    let updated = 0;
+    importRecords.forEach(o => {
+        if (o.status === 'new' && !o.edited && o.txn_kind === 'expense' && (o.name || '').toUpperCase().includes(needle)) {
+            o.envelope = rule.set_envelope;
+            o.match_source = rule.phrase;
+            o.rules = [{ id: ruleId, name: rule.name || rule.phrase, did: ['→ ' + rule.set_envelope] }];
+            o.notes = [];
+            updated++;
+        }
+    });
+    if (updated) importRenderGrid();
+    return updated;
 }
 
 function importMatchExpense(idx) {
@@ -735,13 +877,15 @@ async function importCommit() {
     const toSend = importRecords.filter(r =>
         (r.status === 'new' && !r.skip) || (r.status === 'deleted' && r.restore) || r.status === 'existing');
     const newCount = toSend.filter(r => r.status === 'new' || r.status === 'deleted').length;
-    if (newCount === 0) return;
+    const links = importLinks();
+    if (newCount === 0 && links.length === 0) return;
     const btn = document.getElementById('btnImportCommit');
     btn.disabled = true;
     btn.textContent = 'Saving…';
     try {
-        const files = importFiles.filter(f => f.selected).map(f => f.filename);
-        const result = await apiPost('/api/import/commit', { records: toSend, files });
+        const sync = importMode === 'sync';
+        const files = sync ? ['SimpleFIN'] : importFiles.filter(f => f.selected).map(f => f.filename);
+        const result = await apiPost('/api/import/commit', { records: toSend, files, links, simplefin: sync });
         const banner = document.getElementById('importDoneBanner');
         banner.hidden = false;
         banner.innerHTML = `
@@ -749,6 +893,7 @@ async function importCommit() {
             ${result.existing ? `${result.existing.toLocaleString()} were already in the database and were left alone. ` : ''}
             ${result.rejected ? `${result.rejected} row${result.rejected === 1 ? ' was' : 's were'} skipped because the data was invalid. ` : ''}
             ${result.skipped_deleted ? `${result.skipped_deleted} deleted earlier, not brought back. ` : ''}
+            ${result.linked ? `${result.linked} matched to transactions already saved, so they won't be asked about again. ` : ''}
             ${result.needs_review ? `${result.needs_review} still need review.` : ''}</div>
             <div class="import-done-actions">
                 ${result.needs_review ? '<button type="button" class="btn-modal-save" onclick="goToNeedsReview()">Review them</button>' : ''}
@@ -765,7 +910,7 @@ async function importCommit() {
         await importScanFolder();
         await refreshTransactions();
         // Re-run the preview so the grid now shows these as saved
-        await importProcess();
+        if (sync) await sfAfterSave(); else await importProcess();
         banner.hidden = false;
     } catch (err) {
         showToast('Save failed: ' + err.message, true);
@@ -809,7 +954,14 @@ async function showImportSub(name, keepForm) {
         resetRuleForm();
     }
     if (name === 'history') loadImportHistory();
-    if (name === 'accounts') loadAccounts();
+    if (name !== 'accounts') acctAfterAdd = null;  // left Accounts without adding the account an import asked for
+    document.getElementById('acctAddingFor').hidden = !acctAfterAdd;
+    if (name === 'accounts') await loadAccounts();
+    if (name === 'import') {
+        // An account may have been added or renamed under Accounts: offer it in the account boxes
+        await importRefreshAccounts();
+        await sfRefreshAccountChoices();
+    }
 }
 
 async function loadImportRules() {
@@ -1183,6 +1335,14 @@ async function saveRuleFromForm() {
     }
     try {
         const saved = await apiPost('/api/rules/save', body);
+        if (ruleModalOpen) {
+            // Opened from the import screen: stay here and update the rows being imported
+            closeRuleModal();
+            await loadImportRules();
+            const updated = importApplyNewRule(body, saved.id);
+            showToast(`Rule added: "${body.name || body.phrase}"` + (updated ? ` (${updated} other row${updated === 1 ? '' : 's'} updated)` : ''));
+            return saved;
+        }
         const p = await apiPost('/api/rules/preview', body);
         resetRuleForm();
         await loadImportRules();

@@ -7,13 +7,15 @@ import time
 import secrets
 import sys
 import traceback
+import urllib.request
+import webbrowser
 from datetime import datetime, timedelta
 from email.parser import BytesParser
 from email.policy import HTTP as HTTP_POLICY
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import VERSION, audit, billmatch, budget, cardbills, cards, import_engine, ledger, income, paths, recurrence, reclassify, rule_engine, rules, store
-from . import folder_picker, income_discovery, releases, updater, walkthrough
+from . import folder_picker, income_discovery, releases, simplefin, updater, walkthrough
 from . import profiles as profiles_mod
 from . import envelopes as env_mod
 from .http_util import HttpError, Request, Response, Router
@@ -120,6 +122,8 @@ class App:
         self.port: Optional[int] = None
         self.updater = updater.Updater(paths.ROOT_DIR)
         self.folder_picker = folder_picker.FolderPicker()
+        self.simplefin_opener = urllib.request.urlopen   # tests put a fake bank server here
+        self._sf_fetch: Optional[Dict[str, Any]] = None
 
     @staticmethod
     def _open_only(value: Optional[str]) -> str:
@@ -1097,8 +1101,26 @@ class App:
             info = import_engine.inspect_file_header(path, presets, account_names)
             info.pop("filepath", None)
             info["imported_rows"] = counts.get(info.get("filename", name), 0)
+            # Only an account already on the list is filled in. Otherwise the box starts empty, and the name the file
+            # suggests ("Chase 3653") is shown as what to add under Accounts.
+            guess = cards.clean_name(info.get("account_name"))
+            match = next((k for k in known_accounts if k.lower() == guess.lower()), "") if guess else ""
+            info["account_name"] = match
+            info["suggested_account"] = "" if match else guess
             out.append(info)
         return {"files": out, "accounts": known_accounts}
+
+    @staticmethod
+    def _require_accounts(conn: Any, names: List[Tuple[str, str]]) -> Dict[str, str]:
+        """{name as given: the listed account's name} for (name, what it's for) pairs. Imports only go to accounts
+        that already exist; raises a 400 that says to add the account first."""
+        out = {}
+        for name, what in names:
+            try:
+                out[name] = cards.require_account(conn, name, what)["name"]
+            except ValueError as exc:
+                raise HttpError(400, str(exc), code="no_account")
+        return out
 
     def _resolve_file_configs(self, configs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         resolved = []
@@ -1126,7 +1148,9 @@ class App:
             raise HttpError(400, "No readable files selected")
         conn = self.conn()
         try:
+            listed = self._require_accounts(conn, [(fc["account_name"], fc["filename"]) for fc in configs])
             for fc in configs:
+                fc["account_name"] = listed[fc["account_name"]]
                 if fc["is_mapped"] and fc["headers"]:
                     import_engine.save_preset(conn, fc["headers"], fc["mapping"], fc["account_type"])
                 cards.remember(conn, fc["memory_key"], fc["account_name"])
@@ -1144,11 +1168,23 @@ class App:
     def import_commit(self, req: Request) -> Any:
         data = req.json()
         records = data.get("records") or []
-        if not records:
+        links = [x for x in data.get("links") or [] if isinstance(x, dict)]
+        if not records and not links:
             raise HttpError(400, "Nothing to save")
         conn = self.conn()
         try:
-            result = import_engine.commit_import(conn, records, [str(f) for f in data.get("files") or []])
+            # Rows being added must go to an account on the list (the review screen only offers those)
+            adding = [r for r in records if isinstance(r, dict) and r.get("status") != "existing"]
+            wanted = {cards.clean_name(r.get("account_name")): cards.first_file(r.get("source_file")) for r in adding}
+            listed = self._require_accounts(conn, list(wanted.items()))
+            for r in adding:
+                r["account_name"] = listed[cards.clean_name(r.get("account_name"))]
+            result = import_engine.commit_import(conn, records, [str(f) for f in data.get("files") or []], links)
+            cache = self._sf_cached()
+            if data.get("simplefin") and cache:
+                # The next sync starts a few days before this one ended
+                simplefin.note_saved(conn, cache["start"], cache["end"])
+                conn.commit()
         finally:
             conn.close()
         self.sync_csv()
@@ -1172,6 +1208,172 @@ class App:
 
     def vendor_lookup(self, req: Request) -> Any:
         return import_engine.lookup_vendor_online(str(req.json().get("query", "")))
+
+    # ------------------------------------------------------- bank sync (SimpleFIN)
+
+    def _sf_cached(self) -> Optional[Dict[str, Any]]:
+        """The last sync's download, kept in memory so changing account choices doesn't use up another request."""
+        c = self._sf_fetch
+        return c if c and c["db"] == self._db_path else None
+
+    def _sf_status(self, conn: Any) -> Dict[str, Any]:
+        access = store.get_setting(conn, simplefin.ACCESS_URL_KEY)
+        cache = self._sf_cached()
+        back = simplefin.backfill_from(conn)
+        return {
+            "connected": bool(access), "host": simplefin.host_of(access) if access else "",
+            "connected_at": store.get_setting(conn, simplefin.CONNECTED_AT_KEY) or None,
+            "synced_through": store.get_setting(conn, simplefin.SYNCED_THROUGH_KEY) or None,
+            "requests_today": simplefin.requests_today(conn), "daily_limit": simplefin.DAILY_LIMIT,
+            "bridge_url": simplefin.BRIDGE_URL, "fetched_at": cache["fetched_at"] if cache else None,
+            # A starting day moved earlier than the last download reached: Sync now brings those days in
+            "reach_back": back.isoformat() if back and (not cache or cache["start"] > back) else None,
+        }
+
+    def _sf_result(self, conn: Any) -> Dict[str, Any]:
+        """Status and the bank accounts (from the last download, or remembered from an earlier one so their choices
+        can be changed any time), plus that download's problems and, once every account has been given somewhere
+        to go, its review rows."""
+        out = self._sf_status(conn)
+        cache = self._sf_cached()
+        accounts = simplefin.account_rows(conn, cache["data"] if cache else None)
+        out.update(accounts=accounts, account_options=cards.account_options(conn),
+                   needs_mapping=bool(cache) and any(not a["mapped"] for a in accounts))
+        if not cache:
+            return out
+        out.update(
+            errors=simplefin.explain_errors(cache["data"]),
+            range={"start": cache["start"].isoformat(), "end": (cache["end"] - timedelta(days=1)).isoformat()},
+            cut_short=cache["cut_short"],
+        )
+        if not out["needs_mapping"]:
+            out["preview"] = self._sf_preview(conn, cache)
+        return out
+
+    def _sf_preview(self, conn: Any, cache: Dict[str, Any]) -> Dict[str, Any]:
+        rows, counts = simplefin.to_rows(cache["data"], cache["host"], simplefin.with_current_types(conn, simplefin.load_mapping(conn)))
+        window = (cache["start"].isoformat(), cache["end"].isoformat())
+        preview = import_engine.preview_rows(conn, rows, skipped=counts["unreadable"], sync_window=window)
+        preview["summary"].update(
+            pending=counts["pending"], ignored=counts["ignored"], before_start=counts["before_start"], unmapped=counts["unmapped"])
+        preview["people"] = [dict(r) for r in conn.execute("SELECT id, name FROM people WHERE active = 1 ORDER BY id")]
+        preview["income_sources"] = [
+            dict(r) for r in conn.execute("SELECT id, name, person_id FROM income_sources WHERE active = 1 ORDER BY id")]
+        preview["envelopes"] = _envelope_names(conn)
+        return preview
+
+    @staticmethod
+    def _sf_error(exc: "simplefin.SimpleFinError") -> HttpError:
+        return HttpError(exc.status if 400 <= exc.status < 600 else 400, str(exc), code=exc.code or "simplefin")
+
+    def simplefin_status(self, req: Request) -> Any:
+        conn = self.conn()
+        try:
+            return self._sf_result(conn)
+        finally:
+            conn.close()
+
+    def simplefin_connect(self, req: Request) -> Any:
+        self._need_json(req)
+        token = str(req.json().get("token") or "")
+        try:
+            access = simplefin.claim(token, self.simplefin_opener)
+        except simplefin.SimpleFinError as exc:
+            raise self._sf_error(exc)
+        conn = self.conn()
+        try:
+            store.set_setting(conn, simplefin.ACCESS_URL_KEY, access)
+            store.set_setting(conn, simplefin.CONNECTED_AT_KEY, datetime.now().isoformat(timespec="seconds"))
+            conn.commit()
+            self._sf_fetch = None
+            return dict(self._sf_status(conn), success=True)
+        finally:
+            conn.close()
+
+    def simplefin_disconnect(self, req: Request) -> Any:
+        """Forget the access address. Account choices and the last sync date stay, for connecting again."""
+        self._need_json(req)
+        conn = self.conn()
+        try:
+            conn.execute("DELETE FROM settings WHERE key IN (?, ?)", (simplefin.ACCESS_URL_KEY, simplefin.CONNECTED_AT_KEY))
+            conn.commit()
+            self._sf_fetch = None
+            return dict(self._sf_status(conn), success=True)
+        finally:
+            conn.close()
+
+    def simplefin_sync(self, req: Request) -> Any:
+        """Download posted transactions since the last saved sync (the last 90 days the first time). Nothing is saved."""
+        self._need_json(req)
+        conn = self.conn()
+        try:
+            access = store.get_setting(conn, simplefin.ACCESS_URL_KEY)
+            if not access:
+                raise HttpError(400, "Bank sync isn't connected. Paste a setup token from SimpleFIN Bridge first.")
+            start, end, cut_short = simplefin.sync_range(conn)
+            pieces = simplefin.chunks(start, end)
+            used = simplefin.requests_today(conn)
+            if used + len(pieces) > simplefin.DAILY_LIMIT:
+                raise HttpError(429, f"EVBudget has already asked SimpleFIN for transactions {used} times today. SimpleFIN"
+                                     " turns off access for apps that ask too often, so syncing is paused until tomorrow.")
+            responses = []
+            try:
+                for a, b in pieces:
+                    simplefin.count_request(conn)
+                    responses.append(simplefin.fetch(access, a, b, self.simplefin_opener))
+            except simplefin.SimpleFinError as exc:
+                raise self._sf_error(exc)
+            merged = simplefin.merge(responses)
+            simplefin.remember_accounts(conn, merged)
+            conn.commit()
+            self._sf_fetch = {
+                "db": self._db_path, "data": merged, "host": simplefin.host_of(access),
+                "start": start, "end": end, "cut_short": cut_short,
+                "fetched_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            return self._sf_result(conn)
+        finally:
+            conn.close()
+
+    def simplefin_accounts(self, req: Request) -> Any:
+        """Save which account each bank account goes to (or that it is left out), then show the review rows."""
+        self._need_json(req)
+        choices = [c for c in req.json().get("accounts") or [] if isinstance(c, dict)]
+        conn = self.conn()
+        try:
+            try:
+                simplefin.save_mapping(conn, choices)
+            except ValueError as exc:
+                raise HttpError(400, str(exc))
+            conn.commit()
+            return self._sf_result(conn)
+        finally:
+            conn.close()
+
+    def simplefin_preview(self, req: Request) -> Any:
+        """The review rows again from the last download (after saving, or after editing rules), without a new request."""
+        conn = self.conn()
+        try:
+            cache = self._sf_cached()
+            if not cache:
+                raise HttpError(400, "Press Sync first: there is no downloaded bank data to show.")
+            return self._sf_preview(conn, cache)
+        finally:
+            conn.close()
+
+    OPENABLE_LINKS = ("https://beta-bridge.simplefin.org", "https://bridge.simplefin.org", "https://www.simplefin.org")
+
+    def open_link(self, req: Request) -> Any:
+        """Open a help website in the computer's own browser (the app window has no tabs)."""
+        self._need_json(req)
+        url = str(req.json().get("url") or "")
+        if not any(url == base or url.startswith(base + "/") for base in self.OPENABLE_LINKS):
+            raise HttpError(400, "EVBudget only opens SimpleFIN's own website from here.")
+        try:
+            webbrowser.open(url)
+        except Exception as exc:
+            raise HttpError(500, f"Couldn't open the browser: {exc}. Go to {url} yourself.")
+        return {"success": True}
 
     # ----------------------------------------------------------- people / income
 
@@ -1903,6 +2105,13 @@ class App:
         r.add("POST", "/api/import/commit", self.import_commit)
         r.add("GET", "/api/import/history", self.import_history)
         r.add("POST", "/api/import/vendor-lookup", self.vendor_lookup)
+        r.add("GET", "/api/simplefin/status", self.simplefin_status)
+        r.add("POST", "/api/simplefin/connect", self.simplefin_connect)
+        r.add("POST", "/api/simplefin/disconnect", self.simplefin_disconnect)
+        r.add("POST", "/api/simplefin/sync", self.simplefin_sync)
+        r.add("POST", "/api/simplefin/accounts", self.simplefin_accounts)
+        r.add("POST", "/api/simplefin/preview", self.simplefin_preview)
+        r.add("POST", "/api/open-link", self.open_link)
         return r
 
 
