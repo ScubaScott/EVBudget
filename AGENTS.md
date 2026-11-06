@@ -44,5 +44,7 @@ While a version is not yet pushed, keep adding to its entries. Once it is on `or
 - **Do not commit or push unless asked.** When committing, end the message with the attribution line the session gives. Release steps are in the section above.
 - **Keep it simple for users:** fewer buttons and one dialog per task over many near-identical ones; help text on anything that is not obvious (for example the High/Medium/Low confidence pills).
 - **Don't hide failures:** error messages must say what actually failed, not a generic "failed to connect". A chart or render error must never leave the page broken until restart.
+- **Line endings:** every text file is stored with LF endings, on Windows too. `.gitattributes` enforces it (`* text=auto eol=lf`; only `.bat`/`.cmd` stay CRLF), so a file saved with CRLF cannot turn a one-line change into a whole-file diff, and shell scripts work on the Mac. Do not delete `.gitattributes`, do not set `core.autocrlf=true`, and when writing files from a script use `newline='
+'`. After editing, `git ls-files --eol` should show `i/lf w/lf` for everything except binaries and `.bat` files.
 - **Cross-platform:** Windows, macOS and Linux. Open files, folders and email through the OS from the server, not by navigating the app window (it runs tabless, with no Back button).
 - Specs and plans: `ENVELOPE_BUILD_SPEC.md`, `WALKTHROUGH_PLAN.md`.
