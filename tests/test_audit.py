@@ -2,7 +2,7 @@ import unittest
 from datetime import date
 
 from helpers import TempAppCase
-from evbudget import audit, import_engine
+from evbudget import audit, cards, import_engine
 from evbudget.http_util import HttpError
 
 TODAY = date(2026, 10, 22)
@@ -223,6 +223,9 @@ class ImportHookTests(AuditCase):
         self.write_csv(name, text)
         c = self.conn()
         info = import_engine.inspect_file_header(import_engine.resolve_input_file(name, self.input_dir), {})
+        if not cards.existing_account(c, info["account_name"]):
+            cards.save_account(c, None, info["account_name"], info["account_type"])   # imports need a listed account
+            c.commit()
         pv = import_engine.build_preview(c, [info])
         c.close()
         return self.call(self.app.import_commit, {"records": pv["records"], "files": [name]})

@@ -29,7 +29,7 @@ function renderAccounts() {
         : 'No accounts yet';
     if (!acctData.length) {
         document.getElementById('acctBody').innerHTML =
-            '<tr><td colspan="6" class="import-more">No accounts yet. Add one above, or give a name to the "Card / account" box when you import a file.</td></tr>';
+            '<tr><td colspan="6" class="import-more">No accounts yet. Add one above before importing: each import goes to an account from this list.</td></tr>';
         return;
     }
     document.getElementById('acctBody').innerHTML = acctData.map(a => {
@@ -73,10 +73,41 @@ async function addAccount() {
         await apiPost('/api/accounts/save', { name, account_type: document.getElementById('acctNewType').value });
         input.value = '';
         await loadAccounts();
-        showToast(`Added "${name}". Pick it in the Card / account box when you import a file.`);
+        const after = acctAfterAdd;
+        if (after) {
+            acctAfterAdd = null;
+            await showImportSub('import');
+            await after.done(name);
+            showToast(`Added "${name}" and chose it for ${after.what}.`);
+        } else {
+            showToast(`Added "${name}". Choose it in the account box when you import.`);
+        }
     } catch (err) {
         showToast(err.message, true);
     }
+}
+
+// Imports only go to accounts on this list. When the import screen has nothing to tie a file or bank account to,
+// it sends the person here; once the account is added they go back with it chosen.
+let acctAfterAdd = null;      // {what: 'Chase3855_Activity.csv', done(name)}
+
+async function acctGoAdd(what, suggestedName, suggestedType, done) {
+    acctAfterAdd = { what, done };
+    document.getElementById('acctAddingForText').innerHTML =
+        `Add the account for <strong>${escapeHtml(what)}</strong>, then you'll go back to Import with it chosen.`;
+    const input = document.getElementById('acctNewName');
+    input.value = suggestedName || '';
+    const loading = showImportSub('accounts');     // shows the page (and the note above) at once; the list follows
+    input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    input.focus();
+    input.select();
+    await loading;
+    if (suggestedType && acctTypes.includes(suggestedType)) document.getElementById('acctNewType').value = suggestedType;
+}
+
+function acctCancelAddFor() {
+    acctAfterAdd = null;
+    showImportSub('import');
 }
 
 function editAccount(id) { acctEditingId = id; renderAccounts(); }

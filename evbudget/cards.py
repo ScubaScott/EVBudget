@@ -82,6 +82,12 @@ def known_names(conn: Any) -> List[str]:
     return [r[0] for r in conn.execute("SELECT name FROM accounts ORDER BY name COLLATE NOCASE")]
 
 
+def account_options(conn: Any) -> List[Dict[str, str]]:
+    """[{"name", "account_type"}] for a list to choose from."""
+    adopt_names(conn)
+    return [{"name": r[0], "account_type": r[1]} for r in conn.execute("SELECT name, account_type FROM accounts ORDER BY name COLLATE NOCASE")]
+
+
 # ---------------------------------------------------------------------------
 # The managed list of accounts
 # ---------------------------------------------------------------------------
@@ -148,6 +154,16 @@ def _rewrite_name(conn: Any, old: str, new: str) -> None:
             memory[k], changed = new, True
     if changed:
         store.set_setting(conn, "import_account_names", json.dumps(memory))
+    # Bank sync remembers which account each bank account goes to (simplefin.ACCOUNTS_KEY)
+    try:
+        synced = json.loads(store.get_setting(conn, "simplefin_accounts") or "{}")
+    except ValueError:
+        synced = {}
+    if isinstance(synced, dict) and any(str(v.get("name", "")).lower() == old.lower() for v in synced.values() if isinstance(v, dict)):
+        for v in synced.values():
+            if isinstance(v, dict) and str(v.get("name", "")).lower() == old.lower():
+                v["name"] = new
+        store.set_setting(conn, "simplefin_accounts", json.dumps(synced))
 
 
 def save_account(conn: Any, account_id: Optional[int], name: Any, account_type: Any) -> int:
@@ -191,6 +207,28 @@ def delete_account(conn: Any, account_id: int, merge_into: Optional[int] = None)
         moved = count
     conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
     return moved
+
+
+MISSING_ACCOUNT_HELP = "Add it under Import → Accounts first, then choose it here."
+
+
+def existing_account(conn: Any, name: Any) -> Optional[Dict[str, str]]:
+    """{"name", "account_type"} of the listed account with this name (any capitalization), or None."""
+    name = clean_name(name)
+    row = conn.execute("SELECT name, account_type FROM accounts WHERE name = ?", (name,)).fetchone() if name else None
+    return {"name": row[0], "account_type": row[1]} if row else None
+
+
+def require_account(conn: Any, name: Any, what: str = "") -> Dict[str, str]:
+    """The listed account with this name. Imports only go to accounts that already exist, so the list stays the
+    one the person made. Raises ValueError saying where to add it."""
+    found = existing_account(conn, name)
+    if found:
+        return found
+    name = clean_name(name)
+    if not name:
+        raise ValueError(f"Choose an account{' for ' + what if what else ''}. If it isn't in the list, {MISSING_ACCOUNT_HELP[0].lower() + MISSING_ACCOUNT_HELP[1:]}")
+    raise ValueError(f"There's no account called \"{name}\"{' (for ' + what + ')' if what else ''}. {MISSING_ACCOUNT_HELP}")
 
 
 def assign_account(conn: Any, name: Any, account_type: str = DEFAULT_TYPE) -> str:

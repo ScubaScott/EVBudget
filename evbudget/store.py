@@ -242,6 +242,15 @@ SCHEMA_STATEMENTS = [
         reviewed_at TEXT,
         PRIMARY KEY (check_id, item_key)
     )""",
+    # Other IDs the same transaction arrived under: a bank-sync row and the file row it duplicates, or a file row
+    # left unsaved because it was already saved from another file. Kept when the transaction is deleted, so a
+    # deletion holds under every ID.
+    """CREATE TABLE IF NOT EXISTS txn_aliases (
+        alias_id TEXT PRIMARY KEY,
+        txn_id TEXT NOT NULL,
+        source TEXT,
+        created_at TEXT
+    )""",
     """CREATE TABLE IF NOT EXISTS import_batches (
         id INTEGER PRIMARY KEY,
         created_at TEXT,
@@ -263,6 +272,7 @@ INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_txn_bill ON transactions(bill_id)",
     "CREATE INDEX IF NOT EXISTS idx_rules_stage ON rules(stage, priority)",
     "CREATE INDEX IF NOT EXISTS idx_txn_account ON transactions(account_name)",
+    "CREATE INDEX IF NOT EXISTS idx_alias_txn ON txn_aliases(txn_id)",
 ]
 
 

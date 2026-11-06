@@ -4195,6 +4195,12 @@ button.kind-link:focus-visible {
     flex-wrap: wrap;
 }
 
+/* The same editor, shown as a dialog over the import screen */
+.rules-editor-card.rule-modal-body {
+    position: static;
+    max-height: none;
+}
+
 .rules-list-card .rules-toolbar {
     margin-bottom: 0;
 }
@@ -4452,3 +4458,54 @@ details.rel-entry > summary .rel-name { margin-bottom: 4px; }
 .bill-matches-head { margin-bottom: 6px; }
 .bill-matches-scroll { max-height: 190px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 8px; }
 .bill-matches-scroll td { padding: 5px 10px; }
+
+
+/* Import: bank sync (SimpleFIN) */
+.sf-connect { display: flex; flex-direction: column; gap: 10px; }
+.sf-connect[hidden], .sf-errors[hidden], #sfAccounts[hidden] { display: none; }
+.sf-steps { margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.6; color: var(--text-muted); }
+.sf-steps a { color: var(--accent-blue, inherit); }
+.sf-token { width: 100%; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; resize: vertical; }
+.sf-errors {
+    padding: 10px 14px;
+    border: 1px solid var(--accent-red);
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.5;
+    background: color-mix(in srgb, var(--accent-red) 7%, transparent);
+}
+.sf-errors ul { margin: 6px 0 0; padding-left: 20px; }
+#sfAccounts { display: flex; flex-direction: column; gap: 10px; }
+.sf-accounts-table td { vertical-align: top; }
+#sfSubtitle strong { font-weight: 600; }
+.sf-errors.sf-notes-only { border-color: var(--accent-amber); background: color-mix(in srgb, var(--accent-amber) 7%, transparent); }
+.sf-errors ul + strong { display: block; margin-top: 8px; }
+.import-file-sub.sf-stale { color: var(--accent-amber); }
+/* Disney theme: hidden Mickey ears (hidden_mickey.js puts them in a corner of one card, a new one each launch).
+   Faint until the pointer finds them; other themes never show them. */
+.hidden-mickey-host { position: relative; }
+.hidden-mickey { display: none; }
+[data-theme="disney"] .hidden-mickey {
+    display: block; position: absolute; z-index: 1; line-height: 0; cursor: pointer;
+    color: var(--accent-amber); opacity: 0.22; transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.hidden-mickey svg { fill: currentColor; }
+[data-theme="disney"] .hidden-mickey:hover { opacity: 0.9; transform: scale(1.25); }
+[data-theme="disney"] .hidden-mickey.hidden-mickey-found { opacity: 1; color: var(--accent-red); }
+.hidden-mickey-tl { top: 5px; left: 7px; }
+.hidden-mickey-tr { top: 5px; right: 7px; }
+.hidden-mickey-bl { bottom: 5px; left: 7px; }
+.hidden-mickey-br { bottom: 5px; right: 7px; }
+/* Review grid: the account a row came in under; long names are cut short (the full name is the tooltip) */
+.import-account { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+/* A ticked file with no account chosen yet */
+.select-input.import-needs-account { border-color: var(--accent-amber); box-shadow: 0 0 0 1px var(--accent-amber); }
+/* On Accounts, when the import screen sent the person here to add an account */
+.acct-adding-for {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    margin-bottom: 12px; padding: 10px 14px; border: 1px solid var(--accent-blue); border-radius: 8px; font-size: 13px;
+    background: color-mix(in srgb, var(--accent-blue) 8%, transparent);
+}
+.acct-adding-for[hidden] { display: none; }
+/* A row left out because it looks already saved stays readable: the hint saying which saved row it matches is what to check */
+.import-row-skipped.import-row-dup td { text-decoration: none; opacity: 0.8; }

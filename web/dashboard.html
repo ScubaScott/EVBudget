@@ -115,6 +115,51 @@
 
             <div id="importSubImport">
 
+            <!-- Bank sync (SimpleFIN): instead of files, download from the banks. Same review and save as files. -->
+            <section class="import-card" id="sfCard">
+                <div class="table-header">
+                    <div>
+                        <div class="table-title">Bank sync</div>
+                        <div class="table-subtitle" id="sfSubtitle">Bring transactions in straight from your banks through SimpleFIN Bridge, instead of downloading files.</div>
+                    </div>
+                    <div class="table-header-actions" id="sfActions"></div>
+                </div>
+                <div id="sfConnect" class="sf-connect" hidden>
+                    <ol class="sf-steps">
+                        <li>At <a href="#" onclick="sfOpenBridge(); return false;">SimpleFIN Bridge</a>, sign in, choose <strong>Apps</strong> &rarr; <strong>New app connection</strong>, and copy the setup token it shows.</li>
+                        <li>Paste it below and press Connect. A token works once, so make a new one if this doesn't work.</li>
+                    </ol>
+                    <textarea id="sfToken" class="input-text sf-token" rows="3" spellcheck="false" autocomplete="off" placeholder="Paste the setup token here"></textarea>
+                    <div class="import-actions-right">
+                        <span class="import-hint" id="sfConnectNote"></span>
+                        <button type="button" class="btn-modal-cancel" onclick="sfShowConnect(false)">Cancel</button>
+                        <button type="button" class="btn-modal-save" id="btnSfConnect" onclick="sfConnect()">Connect</button>
+                    </div>
+                </div>
+                <div id="sfErrors" class="sf-errors" hidden></div>
+                <div id="sfAccounts" hidden>
+                    <div class="import-hint" id="sfAccountsIntro"></div>
+                    <div class="table-responsive-container">
+                        <table class="txn-table sf-accounts-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 70px; text-align: center;" title="Untick to leave this bank account out of EVBudget (a loan or investment account, say)">Import</th>
+                                    <th>At the bank</th>
+                                    <th style="width: 240px;" title="Each bank account goes to an account from Import &rarr; Accounts">EVBudget account</th>
+                                    <th style="width: 170px;" title="Transactions before this day are left out. Leave it empty to take everything the bank sends.">Starting from</th>
+                                </tr>
+                            </thead>
+                            <tbody id="sfAccountsBody"></tbody>
+                        </table>
+                    </div>
+                    <div class="import-actions-right">
+                        <span class="import-hint" id="sfAccountsNote"></span>
+                        <button type="button" class="btn-modal-cancel" id="btnSfAccountsCancel" onclick="sfHideAccounts()">Cancel</button>
+                        <button type="button" class="btn-modal-save" onclick="sfSaveAccounts()">Save and review &rarr;</button>
+                    </div>
+                </div>
+            </section>
+
             <!-- Step 1: choose files -->
             <section class="import-card">
                 <div class="table-header">
@@ -150,14 +195,13 @@
                                     <th onclick="importFilesSortBy('name')">File <span id="ifsort_name" class="sort-indicator"></span></th>
                                     <th onclick="importFilesSortBy('modified')" style="width: 110px;">Modified <span id="ifsort_modified" class="sort-indicator">&#9660;</span></th>
                                     <th onclick="importFilesSortBy('imported')" style="width: 150px;">Already in database <span id="ifsort_imported" class="sort-indicator"></span></th>
-                                    <th onclick="importFilesSortBy('account')" style="width: 170px;">Card / account <span id="ifsort_account" class="sort-indicator"></span></th>
+                                    <th onclick="importFilesSortBy('account')" style="width: 200px;" title="Each file goes to an account from Import &rarr; Accounts">Account <span id="ifsort_account" class="sort-indicator"></span></th>
                                     <th onclick="importFilesSortBy('type')" style="width: 170px;">Account type <span id="ifsort_type" class="sort-indicator"></span></th>
                                     <th onclick="importFilesSortBy('columns')" style="width: 190px;">Columns <span id="ifsort_columns" class="sort-indicator"></span></th>
                                 </tr>
                             </thead>
                             <tbody id="importFileBody"></tbody>
                         </table>
-                        <datalist id="importAccountList"></datalist>
                     </div>
                     <div class="import-actions-right">
                         <span class="import-hint" id="importProcessHint"></span>
@@ -199,6 +243,7 @@
                                     <th onclick="importSortBy('date')" style="width: 110px;">Date <span id="isort_date" class="sort-indicator">&#9660;</span></th>
                                     <th onclick="importSortBy('name')">Payee <span id="isort_name" class="sort-indicator"></span></th>
                                     <th onclick="importSortBy('amount')" style="text-align: right; width: 110px;">Amount <span id="isort_amount" class="sort-indicator"></span></th>
+                                    <th onclick="importSortBy('account_name')" style="width: 140px;" title="The account this transaction came in under">Account <span id="isort_account_name" class="sort-indicator"></span></th>
                                     <th style="width: 150px;">Kind</th>
                                     <th style="width: 210px;">Envelope / person</th>
                                     <th onclick="importSortBy('status')" style="width: 130px;">Status <span id="isort_status" class="sort-indicator"></span></th>
@@ -220,7 +265,11 @@
 
             <!-- ===== Accounts ===== -->
             <div id="importSubAccounts" hidden>
-                <div class="import-hint rules-intro">An account is where a transaction came from: a checking account, a credit card. Each import is tied to one, and you can filter any list by account. EVBudget doesn't track balances. Renaming an account renames it on every transaction.</div>
+                <div class="import-hint rules-intro">An account is where a transaction came from: a checking account, a credit card. Each import goes to one from this list, so add an account here before importing from it. You can filter any list by account. EVBudget doesn't track balances. Renaming an account renames it on every transaction.</div>
+                <div id="acctAddingFor" class="acct-adding-for" hidden>
+                    <span id="acctAddingForText"></span>
+                    <button type="button" class="btn-refresh" onclick="acctCancelAddFor()">Back to Import</button>
+                </div>
                 <section class="table-card">
                     <div class="table-header">
                         <div>
@@ -285,7 +334,7 @@
                                 </table>
                             </div>
                         </section>
-                        <aside class="table-card rules-editor-card">
+                        <aside class="table-card rules-editor-card" id="ruleEditorCard">
                             <div class="table-title" id="ruleEditorTitle">New rule</div>
                             <div class="rule-form" id="ruleForm">
                     <div class="rule-form-row">
@@ -350,11 +399,11 @@
                     <div class="rules-regex-preview" id="ruleEditorPreview"></div>
                     <div class="rules-save-buttons">
                         <button type="button" class="btn-modal-save" id="btnRuleSave" onclick="saveRuleFromForm()">Add rule</button>
-                        <button type="button" class="btn-modal-cancel" id="btnRuleCancel" onclick="resetRuleForm()" hidden>Cancel</button>
+                        <button type="button" class="btn-modal-cancel" id="btnRuleCancel" onclick="cancelRuleForm()" hidden>Cancel</button>
                         <button type="button" class="btn-refresh" id="btnRuleRerun" onclick="reviewRuleFromForm()"
                             title="See which saved transactions this rule would change, and choose which ones to update. Nothing changes until you press Apply.">Preview &amp; apply&hellip;</button>
                     </div>
-                    <div class="import-hint">Preview &amp; apply works on the rule as it is in this form, even before you save it.</div>
+                    <div class="import-hint" id="ruleRerunHint">Preview &amp; apply works on the rule as it is in this form, even before you save it.</div>
                 </div>
                         </aside>
                     </div>
@@ -1347,6 +1396,43 @@
         </div>
     </div>
 
+    <!-- Import: offer to turn an envelope choice into a rule -->
+    <div class="modal-overlay" id="askRuleOverlay" onclick="if (event.target === this) closeAskRule()">
+        <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="askRuleTitle" style="max-width: 460px;">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title" id="askRuleTitle">Make a rule for this?</div>
+                </div>
+                <button class="modal-close-btn" onclick="closeAskRule()" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p id="askRuleText" style="margin: 0 0 10px;"></p>
+                <div class="import-hint">A rule is a saved shortcut. Next time a matching payment comes in, EVBudget files it for you. You can look at and change the rule before it is saved.</div>
+            </div>
+            <div class="modal-footer">
+                <div class="modal-footer-msg"></div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-modal-cancel" onclick="closeAskRule()">No thanks</button>
+                    <button type="button" class="btn-modal-save" onclick="askRuleYes()">Yes, make a rule</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Import: the rule editor, shown over the import screen (the form is moved in here while it is open) -->
+    <div class="modal-overlay" id="ruleModalOverlay">
+        <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="ruleModalTitle" style="max-width: 600px;">
+            <div class="modal-header">
+                <div class="modal-title-wrap">
+                    <div class="modal-title" id="ruleModalTitle">New rule</div>
+                    <div class="modal-subtitle">Check the rule, change anything you like, then add it.</div>
+                </div>
+                <button class="modal-close-btn" onclick="closeRuleModal()" title="Close">&times;</button>
+            </div>
+            <div class="modal-body rules-editor-card rule-modal-body" id="ruleModalBody"></div>
+        </div>
+    </div>
+
     <!-- Dashboard Settings Modal with Theme Picker -->
     <div class="modal-overlay" id="settingsModalOverlay">
         <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle" style="max-width: 540px;">
@@ -2165,6 +2251,7 @@
     <script src="/web/js/core.js"></script>
     <script src="/web/js/analytics.js"></script>
     <script src="/web/js/import.js"></script>
+    <script src="/web/js/simplefin.js"></script>
     <script src="/web/js/income.js"></script>
     <script src="/web/js/budget.js"></script>
     <script src="/web/js/envelopes.js"></script>
@@ -2175,5 +2262,6 @@
     <script src="/web/js/accounts.js"></script>
     <script src="/web/js/releases.js"></script>
     <script src="/web/js/updates.js"></script>
+    <script src="/web/js/hidden_mickey.js"></script>
 </body>
 </html>

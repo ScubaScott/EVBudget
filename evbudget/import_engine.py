@@ -376,55 +376,112 @@ def name_similarity(a: str, b: str) -> float:
     return max(contained, prefix, ratio)
 
 
-def find_likely_duplicates(conn: Any, records: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """New rows that are probably transactions already saved from another file: the same amount, within a few days,
-    and a similar merchant. This is what happens when a card is reissued with a new number, or a statement PDF
-    covers days an earlier CSV already brought in. Each saved row can explain only one new row, so three identical
-    purchases on one day need three saved ones. Returns {new txn_id: the saved row it looks like}."""
+SYNC_PREFIX = "SF-"            # simplefin.ID_PREFIX: rows that came from bank sync
+
+
+def _feed(txn_id: str) -> str:
+    """Where an ID came from: "sync" (bank sync) or "file" (a CSV or PDF)."""
+    return "sync" if str(txn_id or "").startswith(SYNC_PREFIX) else "file"
+
+
+def _aliases_of(conn: Any, ids: List[str]) -> Dict[str, List[str]]:
+    """{saved txn_id: the other IDs it is known by}."""
+    out: Dict[str, List[str]] = {}
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        marks = ",".join("?" for _ in chunk)
+        for r in conn.execute(f"SELECT alias_id, txn_id FROM txn_aliases WHERE txn_id IN ({marks})", chunk):
+            out.setdefault(r[1], []).append(r[0])
+    return out
+
+
+def alias_targets(conn: Any, ids: List[str]) -> Dict[str, str]:
+    """{other ID: the saved (or deleted) transaction it is the same as}."""
+    out: Dict[str, str] = {}
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        marks = ",".join("?" for _ in chunk)
+        out.update({r[0]: r[1] for r in conn.execute(f"SELECT alias_id, txn_id FROM txn_aliases WHERE alias_id IN ({marks})", chunk)})
+    return out
+
+
+def find_likely_duplicates(
+    conn: Any, records: List[Dict[str, Any]], taken: Optional[set] = None, sync_window: Optional[Tuple[str, str]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """New rows that are probably transactions already saved: the same amount within a few days, and either a
+    similar merchant or (for bank sync against a file) the same account.
+
+    - A card reissued with a new number, or a statement PDF covering days a CSV already brought in, words the same
+      purchase alike, so similar text is required ("high" confidence).
+    - Bank sync words purchases its own way ("AMZN Mktp US*2K3" against "Amazon.com"), so a synced row and a file row
+      in the same account pair on amount and date alone ("medium"), as long as the saved row isn't already paired
+      with that kind of row.
+    - A saved synced row matches a new synced row only when it falls inside the dates just fetched (sync_window):
+      SimpleFIN should have sent it back under its own ID, so it was probably renumbered.
+
+    `taken` holds saved IDs that rows in this batch already matched exactly; they can't explain another row. Each
+    saved row explains at most one new row, so three identical purchases on one day need three saved ones. Rows in
+    the same account pair first. Returns {new txn_id: the saved row it looks like}.
+    """
     new = [r for r in records if r.get("status") == "new" and r.get("amount")]
     if not new:
         return {}
+    taken = set(taken or ())
     dates = sorted(date.fromisoformat(r["date"]) for r in new)
     low, high = (dates[0] - timedelta(days=DUPLICATE_DAYS)).isoformat(), (dates[-1] + timedelta(days=DUPLICATE_DAYS)).isoformat()
     by_amount: Dict[float, List[Dict[str, Any]]] = {}
     for e in conn.execute(
         "SELECT txn_id, date, name, raw_name, amount, account_name, source_file FROM transactions WHERE date BETWEEN ? AND ?", (low, high)
     ):
-        by_amount.setdefault(round(float(e["amount"]), 2), []).append(dict(e))
+        if e["txn_id"] not in taken:
+            by_amount.setdefault(round(float(e["amount"]), 2), []).append(dict(e))
+    candidate_ids = [e["txn_id"] for rows in by_amount.values() for e in rows]
+    feeds: Dict[str, set] = {tid: {_feed(tid)} for tid in candidate_ids}
+    for tid, others in _aliases_of(conn, candidate_ids).items():
+        feeds[tid].update(_feed(a) for a in others)
 
     pairs = []
     for i, r in enumerate(new):
         day = date.fromisoformat(r["date"])
+        r_feed = _feed(r["txn_id"])
+        r_acct = (r.get("account_name") or "").strip().lower()
         for e in by_amount.get(round(float(r["amount"]), 2), []):
             apart = abs((date.fromisoformat(e["date"]) - day).days)
             if apart > DUPLICATE_DAYS or e["txn_id"] == r["txn_id"]:
                 continue
             files = [f.strip() for f in (e["source_file"] or "").split(",")]
-            if r.get("source_file") and r["source_file"] in files:
+            if r_feed == "file" and r.get("source_file") and r["source_file"] in files:
                 continue                      # saved from this very file: the normal duplicate check handles it
-            score = max(name_similarity(r["raw_name"], e["raw_name"]), name_similarity(r.get("name") or "", e["name"] or ""))
+            same_account = bool(r_acct) and r_acct == (e["account_name"] or "").strip().lower()
+            e_feed = _feed(e["txn_id"])
+            if r_feed == "sync" and e_feed == "sync":
+                if not same_account or not sync_window or not (sync_window[0] <= e["date"] < sync_window[1]):
+                    continue
+            mine = [r["raw_name"], r.get("name") or ""] + list(r.get("other_texts") or [])
+            score = max(name_similarity(a, b) for a in mine for b in (e["raw_name"], e["name"] or ""))
             if score >= DUPLICATE_MIN_SIMILARITY:
-                pairs.append((apart, -score, i, e["txn_id"], e))
-    pairs.sort(key=lambda p: (p[0], p[1], p[2]))
+                confidence = "high"
+            elif same_account and r_feed != e_feed and r_feed not in feeds.get(e["txn_id"], set()):
+                confidence = "medium"
+            else:
+                continue
+            pairs.append((0 if same_account else 1, apart, -score, i, e["txn_id"], e, confidence))
+    pairs.sort(key=lambda p: p[:4])
     taken_new, taken_saved, out = set(), set(), {}
-    for _, _, i, saved_id, e in pairs:
+    for _, _, _, i, saved_id, e, confidence in pairs:
         if i in taken_new or saved_id in taken_saved:
             continue
         taken_new.add(i)
         taken_saved.add(saved_id)
         out[new[i]["txn_id"]] = {
             "txn_id": saved_id, "date": e["date"], "name": e["name"] or e["raw_name"], "account_name": e["account_name"] or "",
-            "source_file": (e["source_file"] or "").split(",")[0].strip(),
+            "source_file": (e["source_file"] or "").split(",")[0].strip(), "confidence": confidence,
         }
     return out
 
 
-def build_preview(conn: Any, file_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Parse and classify the chosen files. Nothing is written.
-
-    Each row is one of: new, existing (already in the database, including rows saved
-    under an older ID formula), or deleted (removed earlier, so not brought back).
-    """
+def parse_files(file_infos: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int, int]:
+    """Read the chosen files. Returns (rows, rows with an unreadable date, rows repeated across files)."""
     parsed: List[Dict[str, Any]] = []
     seen = set()
     skipped = 0
@@ -440,17 +497,37 @@ def build_preview(conn: Any, file_infos: List[Dict[str, Any]]) -> Dict[str, Any]
                 continue
             seen.add(row["txn_id"])
             parsed.append(row)
+    return parsed, skipped, duplicates_in_files
 
+
+def build_preview(conn: Any, file_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Parse and classify the chosen files. Nothing is written."""
+    parsed, skipped, duplicates_in_files = parse_files(file_infos)
+    return preview_rows(conn, parsed, skipped, duplicates_in_files)
+
+
+def preview_rows(
+    conn: Any, parsed: List[Dict[str, Any]], skipped: int = 0, duplicates_in_files: int = 0,
+    sync_window: Optional[Tuple[str, str]] = None,
+) -> Dict[str, Any]:
+    """Classify rows from files or bank sync. Nothing is written.
+
+    Each row is one of: new, existing (already in the database, including rows saved
+    under an older ID formula or linked to another ID), or deleted (removed earlier, so not brought back).
+    """
     all_ids = [r["txn_id"] for r in parsed] + [r["legacy_id"] for r in parsed if r.get("legacy_id")]
-    existing = _existing_rows(conn, all_ids)
-    tombstones = _deleted_ids(conn, all_ids)
+    linked = alias_targets(conn, all_ids)
+    existing = _existing_rows(conn, all_ids + list(set(linked.values())))
+    tombstones = _deleted_ids(conn, all_ids + list(set(linked.values())))
 
     matched: Dict[str, str] = {}  # parsed txn_id -> id of the stored row
     for r in parsed:
-        if r["txn_id"] in existing:
-            matched[r["txn_id"]] = r["txn_id"]
-        elif r.get("legacy_id") and r["legacy_id"] in existing:
-            matched[r["txn_id"]] = r["legacy_id"]
+        tries = [r["txn_id"], r.get("legacy_id"), linked.get(r["txn_id"]), linked.get(r.get("legacy_id") or "")]
+        hit = next((t for t in tries if t and t in existing), None)
+        if hit:
+            matched[r["txn_id"]] = hit
+        elif any(t and t in tombstones for t in tries):
+            tombstones.add(r["txn_id"])
 
     ctx = rules.load_context(conn)
     to_classify = sorted((r for r in parsed if r["txn_id"] not in matched), key=lambda r: (r["date"], r["amount"], r["txn_id"]))
@@ -471,11 +548,15 @@ def build_preview(conn: Any, file_infos: List[Dict[str, Any]]) -> Dict[str, Any]
             check_num=r["check_num"], account_type=r["account_type"], source_file=r["source_file"],
             account_name=r["account_name"], is_included=bool(res["is_included"]), status="deleted" if was_deleted else "new", edited=False,
         )
+        if r.get("other_texts"):
+            rec["other_texts"] = r["other_texts"]       # bank sync's tidier wording, for the duplicate check and the grid
         records.append(rec)
 
+    shown = set()
     for r in parsed:
         stored_id = matched.get(r["txn_id"])
-        if stored_id:
+        if stored_id and stored_id not in shown:
+            shown.add(stored_id)
             e = existing[stored_id]
             rec = {k: e.get(k) for k in RECORD_FIELDS}
             rec.update(rules=[], notes=[])
@@ -485,7 +566,7 @@ def build_preview(conn: Any, file_infos: List[Dict[str, Any]]) -> Dict[str, Any]
             )
             records.append(rec)
 
-    likely = find_likely_duplicates(conn, records)
+    likely = find_likely_duplicates(conn, records, taken=set(matched.values()), sync_window=sync_window)
     for rec in records:
         if rec["txn_id"] in likely and rec["status"] == "new":
             rec["likely_duplicate"] = likely[rec["txn_id"]]
@@ -562,8 +643,31 @@ def _clean_record(r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return out
 
 
-def commit_import(conn: Any, records: List[Dict[str, Any]], file_names: List[str]) -> Dict[str, Any]:
-    """Insert new rows. Existing rows only get last_seen_at and the file name noted."""
+def link_ids(conn: Any, links: List[Dict[str, Any]], now: str) -> int:
+    """Remember that each `txn_id` (a row left unsaved because it looked already saved) is the saved `alias_of`, so
+    the next file or sync with it shows it as already saved instead of asking again. Returns how many were linked."""
+    count = 0
+    for link in links or []:
+        alias = str(link.get("txn_id") or "").strip()
+        target = str(link.get("alias_of") or "").strip()
+        if not alias or not target or alias == target:
+            continue
+        if conn.execute("SELECT 1 FROM transactions WHERE txn_id = ?", (alias,)).fetchone():
+            continue                          # saved in its own right after all
+        if not conn.execute("SELECT 1 FROM transactions WHERE txn_id = ?", (target,)).fetchone():
+            continue
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO txn_aliases (alias_id, txn_id, source, created_at) VALUES (?, ?, ?, ?)",
+            (alias, target, _feed(alias), now))
+        count += cur.rowcount
+    return count
+
+
+def commit_import(
+    conn: Any, records: List[Dict[str, Any]], file_names: List[str], links: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Insert new rows. Existing rows only get last_seen_at and the file name noted. `links` are rows left unsaved
+    as duplicates of saved ones (see link_ids)."""
     now = datetime.now().isoformat()
     inserted = existing = rejected = excluded = review = skipped_deleted = 0
     new_expenses = []
@@ -613,6 +717,7 @@ def commit_import(conn: Any, records: List[Dict[str, Any]], file_names: List[str
                 new_expenses.append((rec["date"], rec["txn_id"]))
             excluded += 0 if rec["is_included"] else 1
             review += rec["needs_review"]
+        linked = link_ids(conn, links or [], now)
         bills_matched = 0
         for _, tid in sorted(new_expenses):
             if billmatch.match_transaction(conn, tid):
@@ -631,7 +736,7 @@ def commit_import(conn: Any, records: List[Dict[str, Any]], file_names: List[str
     return {
         "inserted": inserted, "existing": existing, "rejected": rejected, "excluded": excluded,
         "skipped_deleted": skipped_deleted, "bills_matched": bills_matched, "inserted_ids": inserted_ids,
-        "needs_review": review, "batch_id": batch_id, "total_in_store": total,
+        "needs_review": review, "batch_id": batch_id, "total_in_store": total, "linked": linked,
     }
 
 
